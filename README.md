@@ -42,12 +42,15 @@ Core engine, every pipeline, the cloud storage layer and multisite support are i
 - Provider settings live in one option (`migratekit_cloud`) and are masked in every REST/API surface — a `********` value or an empty secret keeps the stored secret on save, so OAuth tokens always survive settings edits.
 - S3 talks SigV4 with unsigned payloads and always-multipart uploads, so plain-HTTP endpoints (MinIO on LAN) work out of the box.
 - Dropbox/Google Drive use OAuth2 with admin-post callbacks; the app must whitelisted the site's callback URL, which the Cloud page shows.
+- **Easy connect paths (AI1WM-style, no user app setup):**
+  - Dropbox: the distribution can embed a public App key (`MIGRATEKIT_DROPBOX_APP_ID`); "Connect Dropbox" then opens the consent page with PKCE, and the user only pastes the displayed authorisation code. Token exchanges and refreshes are keyless (app key + verifier). A "Use my own Dropbox app" panel retains the full client-id/secret flow.
+  - Google Drive: the recommended mode is a **service account** — paste the JSON key, share a Drive folder with the service-account address, done. Tokens are minted on demand with RS256-signed JWTs; the classic OAuth client flow stays available as a toggle.
 - Known limitation: if the site crashes mid-chunk on Dropbox/Drive, the provider-side upload cursor desyncs from the job state (S3 self-heals by listing parts). Restarting the push job (new session, overwrite mode) recovers either way.
 - Scheduled backups can name a cloud provider; each successful run publishes the new archive there automatically and appends the result to the schedule status and notification email.
 
 ### Cloud tooling
 
-- `php tests/run-cloud.php` — 99-check offline suite: SigV4 derivation invariants, request shaping with a fake transport, provider semantics, push/pull pipelines.
+- `php tests/run-cloud.php` — 148-check offline suite: SigV4 derivation invariants, request shaping with a fake transport, provider semantics (including the PKCE paste-code connection and service-account JWT minting), push/pull pipelines.
 - `tools/minio-integration.php` — real S3 round trip (multipart upload, listing, ranged download, delete) against any S3 endpoint; driven by `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` env vars.
 - `tools/wp-cloud-smoke.php` — run inside WordPress via `tools/wp-cloud-test.sh`; exercises the cloud REST routes, settings masking and a live push/pull round trip when `MK_CLOUD_*` env vars point at reachable storage.
 

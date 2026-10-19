@@ -95,6 +95,10 @@ final class S3Provider implements CloudProviderInterface {
 		return '';
 	}
 
+	public function connect(): array {
+		return array( 'url' => '', 'state' => '', 'paste' => false );
+	}
+
 	public function test(): void {
 		$response = $this->request('GET', $this->bucket_base(), array(), array(), null);
 

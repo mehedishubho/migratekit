@@ -68,13 +68,68 @@ final class DropboxProvider implements CloudProviderInterface {
 	}
 
 	public function is_ready(): bool {
+		if ($this->field('access_token') === '') {
+			return false;
+		}
+
+		// Refreshing needs an app identity: either the legacy pair or the
+		// embedded/public app key behind the one-click connection.
 		return $this->field('client_id') !== ''
-			&& $this->field('client_secret') !== ''
-			&& $this->field('access_token') !== '';
+			|| $this->field('client_secret') !== ''
+			|| $this->app_key() !== '';
+	}
+
+	/**
+	 * One-click (public client) mode: an app key with no secret. Dropbox
+	 * then ends the consent page on a code the user pastes back, and the
+	 * token exchange is authenticated by the PKCE verifier alone.
+	 *
+	 * @return bool
+	 */
+	public function easy_mode(): bool {
+		return $this->field('client_secret') === '';
+	}
+
+	/**
+	 * The Dropbox App key: the stored value, else the one embedded in the
+	 * distribution so connecting needs zero fields.
+	 *
+	 * @return string
+	 */
+	public function app_key(): string {
+		$stored = $this->field('client_id');
+
+		if ($stored !== '') {
+			return $stored;
+		}
+
+		$embedded = defined('MIGRATEKIT_DROPBOX_APP_ID') ? (string) MIGRATEKIT_DROPBOX_APP_ID : '';
+
+		return $embedded !== '' ? $embedded : '';
 	}
 
 	public function authorize_url(): string {
-		if ($this->field('client_id') === '' || self::redirect_url() === '') {
+		if ($this->app_key() === '') {
+			return '';
+		}
+
+		if ($this->easy_mode()) {
+			// Preview only; the real connection start is connect(), which
+			// stores the verifier the URL's challenge hashes.
+			return self::AUTHORIZE . '?' . http_build_query(
+				array(
+					'response_type'         => 'code',
+					'client_id'             => $this->app_key(),
+					'token_access_type'     => 'offline',
+					'code_challenge'        => $this->challenge($this->new_verifier()),
+					'code_challenge_method' => 'S256',
+					'scope'                 => 'files.content.read files.content.write files.metadata.read offline.access',
+					'state'                 => wp_create_nonce('migratekit_cloud_dropbox'),
+				)
+			);
+		}
+
+		if (self::redirect_url() === '') {
 			return '';
 		}
 
@@ -88,6 +143,111 @@ final class DropboxProvider implements CloudProviderInterface {
 				'state'             => wp_create_nonce('migratekit_cloud_dropbox'),
 			)
 		);
+	}
+
+	public function connect(): array {
+		if ($this->app_key() === '') {
+			return array( 'url' => '', 'state' => '', 'paste' => false );
+		}
+
+		$state = wp_create_nonce('migratekit_cloud_dropbox');
+
+		if (! $this->easy_mode() || self::redirect_url() === '') {
+			// Legacy secret flow: consent redirects back to admin-post.php.
+			return array(
+				'url'   => self::AUTHORIZE . '?' . http_build_query(
+					array(
+						'response_type'     => 'code',
+						'client_id'         => $this->field('client_id'),
+						'redirect_uri'      => self::redirect_url(),
+						'token_access_type' => 'offline',
+						'scope'             => 'files.content.read files.content.write',
+						'state'             => $state,
+					)
+				),
+				'state' => $state,
+				'paste' => false,
+			);
+		}
+
+		$verifier = $this->new_verifier();
+		$this->store_verifier($state, $verifier);
+
+		return array(
+			'url'   => self::AUTHORIZE . '?' . http_build_query(
+				array(
+					'response_type'         => 'code',
+					'client_id'             => $this->app_key(),
+					'token_access_type'     => 'offline',
+					'code_challenge'        => $this->challenge($verifier),
+					'code_challenge_method' => 'S256',
+					'scope'                 => 'files.content.read files.content.write files.metadata.read offline.access',
+					'state'                 => $state,
+				)
+			),
+			'state' => $state,
+			'paste' => true,
+		);
+	}
+
+	/**
+	 * Random PKCE code verifier (64 hex characters).
+	 *
+	 * @return string
+	 */
+	private function new_verifier(): string {
+		return bin2hex((string) random_bytes(32));
+	}
+
+	/**
+	 * S256 challenge derived from a verifier.
+	 *
+	 * @param string $verifier Verifier bytes.
+	 * @return string
+	 */
+	private function challenge(string $verifier): string {
+		return rtrim(strtr(base64_encode((string) hash('sha256', $verifier, true)), '+/', '-_'), '=');
+	}
+
+	/**
+	 * Keep the verifier with its state so the exchange can pair them.
+	 *
+	 * @param string $state    State token.
+	 * @param string $verifier Verifier bytes.
+	 * @return void
+	 */
+	private function store_verifier(string $state, string $verifier): void {
+		if ($state === '' || ! function_exists('set_transient')) {
+			return;
+		}
+
+		set_transient('migratekit_cloud_dropbox_' . hash('sha256', $state), $verifier, 600);
+	}
+
+	/**
+	 * Fetch and drop the verifier held for a state.
+	 *
+	 * @param string $state State token.
+	 * @return string '' when missing or expired.
+	 */
+	private function take_verifier(string $state): string {
+		if ($state === '' || ! function_exists('get_transient')) {
+			throw new \RuntimeException('The Dropbox connection state is missing. Click Connect again.');
+		}
+
+		$key    = 'migratekit_cloud_dropbox_' . hash('sha256', $state);
+		$value  = get_transient($key);
+		$exists = $value !== false;
+
+		if (function_exists('delete_transient') && $exists) {
+			delete_transient($key);
+		}
+
+		if ($exists === false) {
+			throw new \RuntimeException('The Dropbox connection expired. Click Connect again.');
+		}
+
+		return is_string($value) ? $value : '';
 	}
 
 	/**
@@ -104,6 +264,7 @@ final class DropboxProvider implements CloudProviderInterface {
 			'client_id'     => $this->field('client_id'),
 			'client_secret' => $this->field('client_secret') !== '' ? Manager::MASK : '',
 			'folder'        => $this->field('folder'),
+			'mode'          => $this->easy_mode() && $this->field('client_id') === '' ? 'easy' : 'advanced',
 			'connected'     => $this->field('access_token') !== '',
 			'account'       => $this->field('account'),
 			'expires_at'    => (int) ( $this->config['expires_at'] ?? 0 ),
@@ -131,21 +292,31 @@ final class DropboxProvider implements CloudProviderInterface {
 	}
 
 	/**
-	 * Exchange an authorisation code for access/refresh tokens.
+	 * Authorisation code exchange, PKCE (no secret) or legacy secret flow.
 	 *
-	 * @param string $code Authorisation code from the redirect.
+	 * @param string $code  Authorisation code from the redirect or paste box.
+	 * @param string $state State token binding the exchange to its start.
 	 * @return void
 	 */
-	public function authorize_code(string $code): void {
-		$body = http_build_query(
-			array(
-				'grant_type'    => 'authorization_code',
-				'code'          => $code,
-				'client_id'     => $this->field('client_id'),
-				'client_secret' => $this->field('client_secret'),
-				'redirect_uri'  => self::redirect_url(),
+	public function authorize_code(string $code, string $state = ''): void {
+		$body = $this->easy_mode()
+			? http_build_query(
+				array(
+					'grant_type'    => 'authorization_code',
+					'code'          => $code,
+					'client_id'     => $this->app_key(),
+					'code_verifier' => $this->take_verifier($state),
+				)
 			)
-		);
+			: http_build_query(
+				array(
+					'grant_type'    => 'authorization_code',
+					'code'          => $code,
+					'client_id'     => $this->field('client_id'),
+					'client_secret' => $this->field('client_secret'),
+					'redirect_uri'  => self::redirect_url(),
+				)
+			);
 
 		$response = Transport::send(
 			'POST',
@@ -475,12 +646,18 @@ final class DropboxProvider implements CloudProviderInterface {
 		}
 
 		$body = http_build_query(
-			array(
-				'grant_type'    => 'refresh_token',
-				'refresh_token' => $refresh,
-				'client_id'     => $this->field('client_id'),
-				'client_secret' => $this->field('client_secret'),
-			)
+			$this->easy_mode()
+				? array(
+					'grant_type'    => 'refresh_token',
+					'refresh_token' => $refresh,
+					'client_id'     => $this->app_key(),
+				)
+				: array(
+					'grant_type'    => 'refresh_token',
+					'refresh_token' => $refresh,
+					'client_id'     => $this->field('client_id'),
+					'client_secret' => $this->field('client_secret'),
+				)
 		);
 
 		$response = Transport::send(

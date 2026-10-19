@@ -50,6 +50,28 @@ function wp_create_nonce(string $action = ''): string {
 	return substr(hash('sha256', $action . '|nonce'), 0, 10);
 }
 
+function wp_verify_nonce(string $nonce, string $action = ''): int|false {
+	return $nonce !== '' && $nonce === substr(hash('sha256', $action . '|nonce'), 0, 10) ? 1 : false;
+}
+
+$GLOBALS['mk_transient'] = array();
+
+function get_transient(string $key) {
+	return array_key_exists($key, $GLOBALS['mk_transient']) ? $GLOBALS['mk_transient'][ $key ] : false;
+}
+
+function set_transient(string $key, $value, $ttl = 0): bool {
+	$GLOBALS['mk_transient'][ $key ] = $value;
+
+	return true;
+}
+
+function delete_transient(string $key): bool {
+	unset($GLOBALS['mk_transient'][ $key ]);
+
+	return true;
+}
+
 $GLOBALS['cl_tmp'] = sys_get_temp_dir() . '/mk-cloud-' . bin2hex(random_bytes(4));
 mkdir($GLOBALS['cl_tmp']);
 
@@ -897,6 +919,293 @@ $result = Transport::send('GET', 'http://fake.test', array(), null, 5, static fu
 
 same_cl('invalid transport result is safe', 0, $result['status']);
 check_cl('error recorded', $result['error'] !== '');
+
+// ---------------------------------------------------------------------------
+echo "\n[10] Easy connect: Dropbox paste-code and Google service accounts\n";
+
+// The embedded public Dropbox app key must live ahead of provider calls.
+if (! defined('MIGRATEKIT_DROPBOX_APP_ID')) {
+	define('MIGRATEKIT_DROPBOX_APP_ID', 'migratekit-public-app');
+}
+
+$easy_calls = new ClRecorder();
+
+$easyfake = function (string $method, string $url, array $headers, $body) use ($easy_calls): array {
+	$easy_calls->record($method, $url, $headers, $body);
+
+	if (strpos($url, 'dropboxapi.com/oauth2/token') !== false) {
+		parse_str((string) $body, $sent);
+
+		if (( $sent['grant_type'] ?? '' ) === 'authorization_code') {
+			return array(
+				'status'  => 200,
+				'headers' => array(),
+				'body'    => json_encode(array( 'access_token' => 'paste-tok', 'refresh_token' => 'paste-ref', 'expires_in' => 14400 )),
+			);
+		}
+
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => json_encode(array( 'access_token' => 'fresh-tok', 'expires_in' => 14400 )),
+		);
+	}
+
+	if ($method === 'POST' && strpos($url, '/users/get_current_account') !== false) {
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => json_encode(array( 'email' => 'easy@example.test' )),
+		);
+	}
+
+	return array( 'status' => 404, 'headers' => array(), 'body' => '' );
+};
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	'dropbox' => array( 'folder' => 'backups', 'http' => $easyfake ),
+);
+
+$easy = Manager::provider('dropbox');
+
+check_cl('easy mode with no stored secret', $easy !== null && $easy->easy_mode());
+same_cl('embedded app key picked up', 'migratekit-public-app', $easy->app_key());
+check_cl('easy connect offered', Manager::easy_connect('dropbox'));
+
+$start = Manager::connecting('dropbox');
+check_cl('easy start returns a url', $start['url'] !== '');
+contains_cl('easy url carries app key', $start['url'], 'client_id=migratekit-public-app');
+contains_cl('easy url binds s256 challenge', $start['url'], 'code_challenge_method=S256');
+contains_cl('easy url requests offline tokens', $start['url'], 'token_access_type=offline');
+check_cl('easy url has no redirect', strpos($start['url'], 'redirect_uri=') === false);
+same_cl('easy start flagged for paste', true, $start['paste']);
+
+$saved_state = $start['state'];
+$verifier_box = 'migratekit_cloud_dropbox_' . hash('sha256', $saved_state);
+check_cl('verifier stored with state', strlen((string) get_transient($verifier_box)) === 64);
+
+$challenge_expected = rtrim(strtr(base64_encode(hash('sha256', (string) get_transient($verifier_box), true)), '+/', '-_'), '=');
+contains_cl('challenge derives from stored verifier', $start['url'], 'code_challenge=' . $challenge_expected);
+
+Manager::exchanging('dropbox', 'paste-code-1', $saved_state);
+
+$exchange = $easy_calls->call_hitting('oauth2/token');
+parse_str((string) $exchange['body'], $sent);
+same_cl('exchange code travels', 'paste-code-1', $sent['code'] ?? '');
+same_cl('exchange uses the app key', 'migratekit-public-app', $sent['client_id'] ?? '');
+check_cl('exchange carries the verifier', strlen($sent['code_verifier'] ?? '') === 64);
+check_cl('exchange is keyless', strpos((string) $exchange['body'], 'client_secret') === false);
+check_cl('exchange has no redirect', strpos((string) $exchange['body'], 'redirect_uri') === false);
+same_cl('paste token stored', 'paste-tok', Manager::settings()['dropbox']['access_token']);
+check_cl('verifier single-use', get_transient($verifier_box) === false);
+
+$replayed = '';
+try {
+	Manager::exchanging('dropbox', 'paste-code-2', $saved_state);
+} catch (RuntimeException $caught) {
+	$replayed = $caught->getMessage();
+}
+
+check_cl('replayed state refused', $replayed !== '');
+
+$replayed = '';
+try {
+	Manager::exchanging('dropbox', 'paste-code-3', 'forged-state');
+} catch (RuntimeException $caught) {
+	$replayed = $caught->getMessage();
+}
+
+check_cl('forged state refused', $replayed !== '');
+
+// Easy-mode tokens refresh with the app key alone.
+$refresh_calls = new ClRecorder();
+
+$refreshfake = function (string $method, string $url, array $headers, $body) use ($refresh_calls, &$account_had_401): array {
+	$refresh_calls->record($method, $url, $headers, $body);
+
+	if (strpos($url, 'dropboxapi.com/oauth2/token') !== false) {
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => json_encode(array( 'access_token' => 'fresh-tok', 'expires_in' => 14400 )),
+		);
+	}
+
+	if (strpos($url, '/users/get_current_account') !== false) {
+		if (! $account_had_401) {
+			$account_had_401 = true;
+
+			return array( 'status' => 401, 'headers' => array(), 'body' => '' );
+		}
+
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => json_encode(array( 'email' => 'easy@example.test' )),
+		);
+	}
+
+	return array( 'status' => 404, 'headers' => array(), 'body' => '' );
+};
+
+$account_had_401 = false;
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	'dropbox' => array( 'folder' => '', 'access_token' => 'stale', 'refresh_token' => 'stay', 'http' => $refreshfake ),
+);
+
+$easy2 = Manager::provider('dropbox');
+check_cl('easy tokens ready on embedded key', $easy2 !== null && $easy2->is_ready());
+$easy2->test();
+
+$refresh_post = null;
+
+foreach ($refresh_calls->calls as $call) {
+	if (strpos($call['url'], 'oauth2/token') !== false) {
+		parse_str($call['body'], $sent2);
+		same_cl('easy refresh keeps codes', 'refresh_token', $sent2['grant_type'] ?? '');
+		same_cl('easy refresh uses app key', 'migratekit-public-app', $sent2['client_id'] ?? '');
+		check_cl('easy refresh without secret', strpos($call['body'], 'client_secret') === false);
+	}
+}
+
+$last_account = null;
+
+foreach ($refresh_calls->calls as $call) {
+	if (strpos($call['url'], 'get_current_account') !== false) {
+		$last_account = $call;
+	}
+}
+
+same_cl('retry after refresh carries fresh token', 'Bearer fresh-tok', (string) headers_get((array) $last_account['headers'], 'Authorization'));
+// ---------------------------------------------------------------------------
+echo "\n[10b] Google service account (no OAuth app)\n";
+
+$key = openssl_pkey_new(array( 'private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA ));
+openssl_pkey_export($key, $private_pem);
+$public_pem = openssl_pkey_get_details($key)['key'];
+
+$sa_json_raw = json_encode(
+	array(
+		'client_email' => 'migratekit@backups.iam.gserviceaccount.com',
+		'private_key'  => $private_pem,
+	)
+);
+
+$parsed = DriveProvider::settings(array( 'service_account' => (string) $sa_json_raw ));
+same_cl('service json email trimmed', 'migratekit@backups.iam.gserviceaccount.com', $parsed['client_email']);
+check_cl('service json key parsed', strpos($parsed['private_key'], 'PRIVATE KEY') !== false);
+
+$bad = '';
+try {
+	DriveProvider::settings(array( 'service_account' => '{"client_email":"x"}' ));
+} catch (RuntimeException $caught) {
+	$bad = $caught->getMessage();
+}
+
+check_cl('incomplete service json refused', $bad !== '');
+
+$sa_calls = new ClRecorder();
+
+$safake = function (string $method, string $url, array $headers, $body) use ($sa_calls): array {
+	$sa_calls->record($method, $url, $headers, $body);
+
+	if (strpos($url, 'oauth2.googleapis.com/token') !== false) {
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => json_encode(array( 'access_token' => 'sa-tok', 'expires_in' => 3600 )),
+		);
+	}
+
+	if (strpos($url, '/drive/v3/about') !== false) {
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => json_encode(array( 'user' => array( 'emailAddress' => 'migratekit@backups.iam.gserviceaccount.com' ) )),
+		);
+	}
+
+	return array( 'status' => 404, 'headers' => array(), 'body' => '' );
+};
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	'gdrive' => array( 'http' => $safake ),
+);
+
+$fresh_drive = Manager::provider('gdrive');
+same_cl('fresh drive defaults to service mode', 'service', $fresh_drive->auth_mode());
+same_cl('fresh drive is not ready yet', false, $fresh_drive->is_ready());
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	'gdrive' => array(
+		'client_email' => 'migratekit@backups.iam.gserviceaccount.com',
+		'private_key'  => $private_pem,
+		'folder'       => 'shared-folder-id',
+		'http'         => $safake,
+	),
+);
+
+$sa = Manager::provider('gdrive');
+
+check_cl('service account ready without oauth', $sa !== null && $sa->is_ready());
+same_cl('service account mode flagged', 'service', $sa->auth_mode());
+check_cl('service account has no authorize url', $sa->authorize_url() === '');
+check_cl('service account connect is a no-op', $sa->connect()['url'] === '');
+
+$sa->test();
+
+$token_call = $sa_calls->call_hitting('oauth2.googleapis.com/token');
+check_cl('service token minted on first use', $token_call !== null);
+parse_str((string) $token_call['body'], $sent);
+same_cl('service grant is jwt-bearer', 'urn:ietf:params:oauth:grant-type:jwt-bearer', $sent['grant_type'] ?? '');
+check_cl('assertion present', strpos($sent['assertion'] ?? '', '.') !== false);
+
+$parts = explode('.', (string) $sent['assertion']);
+check_cl('assertion is a compact jwt', count($parts) === 3);
+
+$claims = null;
+$ok_sig = false;
+
+if (count($parts) === 3) {
+	$claims = json_decode(base64_decode(strtr((string) $parts[1], '-_', '+/')), true);
+	$header_json = json_decode(base64_decode(strtr((string) $parts[0], '-_', '+/')), true);
+	same_cl('jwt alg is rs256', 'RS256', $header_json['alg'] ?? '');
+	same_cl('jwt issuer is the service account', 'migratekit@backups.iam.gserviceaccount.com', $claims['iss'] ?? '');
+	same_cl('jwt audience is google token', 'https://oauth2.googleapis.com/token', $claims['aud'] ?? '');
+	contains_cl('jwt scope is drive', (string) ( $claims['scope'] ?? '' ), 'auth/drive');
+
+	$published = openssl_pkey_get_public($public_pem);
+	$ok_sig    = openssl_verify((string) $parts[0] . '.' . (string) $parts[1], base64_decode(strtr((string) $parts[2], '-_', '+/')), $published, OPENSSL_ALGO_SHA256) === 1;
+}
+
+check_cl('service signature verifies rs256', $ok_sig);
+
+$about = $sa_calls->call_hitting('/drive/v3/about');
+same_cl('minted token authorises calls', 'Bearer sa-tok', headers_get((array) $about['headers'], 'Authorization'));
+
+$expiry = Manager::settings()['gdrive']['expires_at'] ?? 0;
+check_cl('minted expiry remembered', $expiry > time() + 3000);
+
+$mint_count = 0;
+
+foreach ($sa_calls->calls as $call) {
+	if (strpos($call['url'], 'oauth2.googleapis.com/token') !== false) {
+		++$mint_count;
+	}
+}
+
+same_cl('token reused while fresh', 1, $mint_count);
+
+$display = $sa->display();
+same_cl('service key displayed masked', Manager::MASK, $display['service_account']);
+same_cl('service display shows the email', 'migratekit@backups.iam.gserviceaccount.com', $display['client_email']);
+same_cl('service display mode', 'service', $display['auth_mode']);
+
+// Re-save with the masked textarea keeps the parsed pair.
+$kept = Manager::save('gdrive', array( 'service_account' => Manager::MASK, 'folder' => 'shared-folder-id' ));
+same_cl('resave keeps the service email', 'migratekit@backups.iam.gserviceaccount.com', $kept['client_email']);
+check_cl('resave keeps the private key', strpos($kept['private_key'], 'PRIVATE KEY') !== false);
 
 // ---------------------------------------------------------------------------
 echo "\n";

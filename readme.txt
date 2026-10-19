@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.2
+Stable tag: 0.0.3
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -65,6 +65,10 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 
 == Changelog ==
 
+= 0.0.3 =
+* Cloud connections made easy: Dropbox connects in one click from the Cloud page (paste the shown authorisation code; no app setup), and Google Drive accepts a service-account JSON key the same way, no OAuth client required.
+* S3 settings gained guided console links.
+
 = 0.0.2 =
 * Adds an explanatory admin notice when the compiled front-end assets are missing, for example after installing from a source archive instead of the release ZIP. Previously this showed blank admin pages.
 
@@ -80,6 +84,9 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 * WP-CLI commands and a REST API covering every operation.
 
 == Upgrade Notice ==
+
+= 0.0.3 =
+Cloud storage is now one-click for Dropbox and paste-a-key simple for Google Drive.
 
 = 0.0.2 =
 If you installed from a *Source code* archive and saw white MigrateKit pages, install the release ZIP instead; 0.0.2 now also shows an explanatory notice when the compiled front-end is missing.

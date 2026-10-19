@@ -20,11 +20,11 @@ final class Manager {
 	public const MASK      = '********';
 	public const PROVIDERS = array( S3Provider::ID, DropboxProvider::ID, DriveProvider::ID );
 
-	/** @var array<string,string> Per-provider secret-ish field kept on save. */
+	/** @var array<string,string[]> Per-provider secret-ish fields kept on save. */
 	public const SECRET_FIELDS = array(
-		S3Provider::ID      => 'secret_key',
-		DropboxProvider::ID => 'client_secret',
-		DriveProvider::ID   => 'client_secret',
+		S3Provider::ID      => array( 'secret_key' ),
+		DropboxProvider::ID => array( 'client_secret' ),
+		DriveProvider::ID   => array( 'client_secret', 'private_key', 'client_email' ),
 	);
 
 	private function __construct() {
@@ -99,20 +99,28 @@ final class Manager {
 			}
 		}
 
-		$secret_field = isset(self::SECRET_FIELDS[ $id ]) ? self::SECRET_FIELDS[ $id ] : '';
+		$secret_fields = isset(self::SECRET_FIELDS[ $id ]) ? self::SECRET_FIELDS[ $id ] : array();
 
 		foreach ($clean as $field => $value) {
-			if ($field === $secret_field && (string) $value === '' && isset($old[ $field ]) && (string) $old[ $field ] !== '') {
+			if (in_array($field, $secret_fields, true) && (string) $value === '' && isset($old[ $field ]) && (string) $old[ $field ] !== '') {
 				$merged[ $field ] = $old[ $field ];
 				continue;
 			}
 
-			if ($field === $secret_field && (string) $value === self::MASK) {
-				$merged[ $field ] = $old[ $field ] ?? '';
+			if (in_array($field, $secret_fields, true) && (string) $value === self::MASK) {
+				$merged[ $field ] = isset($old[ $field ]) ? $old[ $field ] : '';
 				continue;
 			}
 
 			$merged[ $field ] = $value;
+		}
+
+		// Secret fields the form did not echo (absent or skipped) survive
+		// from storage, so partial saves never drop stored credentials.
+		foreach ($secret_fields as $field) {
+			if (! array_key_exists($field, $merged) && isset($old[ $field ]) && (string) $old[ $field ] !== '') {
+				$merged[ $field ] = $old[ $field ];
+			}
 		}
 
 		$all        = self::settings();
@@ -183,6 +191,7 @@ final class Manager {
 				'ready'    => $provider->is_ready(),
 				'auth'     => $provider->authorize_url() !== '',
 				'authUrl'  => $provider->authorize_url(),
+				'easy'     => self::easy_connect($id),
 				'settings' => $provider->display(),
 			);
 		}
@@ -208,6 +217,74 @@ final class Manager {
 		}
 
 		$provider->test();
+	}
+
+	/**
+	 * Start an interactive connection: return the browser URL plus the
+	 * state the follow-up exchange must present again.
+	 *
+	 * @param string $id Provider id.
+	 * @return array{url:string,state:string,paste:bool}
+	 */
+	public static function connecting(string $id): array {
+		$provider = self::provider($id);
+
+		if ($provider === null) {
+			throw new \RuntimeException('Unknown cloud provider: ' . $id);
+		}
+
+		$start = $provider->connect();
+
+		if ($start['url'] === '') {
+			throw new \RuntimeException(
+				'The ' . $provider->label() . ' connection needs app credentials on the Cloud page first, or a paste of the service-account key.'
+			);
+		}
+
+		return $start;
+	}
+
+	/**
+	 * Complete a paste-mode connection: verify the state, then exchange
+	 * the authorisation code the storage provider displayed.
+	 *
+	 * @param string $id    Provider id.
+	 * @param string $code  Authorisation code from the consent page.
+	 * @param string $state State token from the connection start.
+	 * @return void
+	 */
+	public static function exchanging(string $id, string $code, string $state): void {
+		$provider = self::provider($id);
+
+		if ($provider === null) {
+			throw new \RuntimeException('Unknown cloud provider: ' . $id);
+		}
+
+		if ($code === '' || $state === '' || wp_verify_nonce($state, 'migratekit_cloud_' . $id) === false) {
+			throw new \RuntimeException('The connection state is invalid or expired. Click Connect again.');
+		}
+
+		$provider->authorize_code($code, $state);
+	}
+
+	/**
+	 * Whether the provider offers the one-click paste-a-code flow with no
+	 * stored app credentials (Dropbox with the embedded app key).
+	 *
+	 * @param string $id Provider id.
+	 * @return bool
+	 */
+	public static function easy_connect(string $id): bool {
+		if ($id === DropboxProvider::ID) {
+			$provider = self::provider($id);
+
+			return $provider !== null
+				&& $provider instanceof DropboxProvider
+				&& $provider->easy_mode()
+				&& $provider->app_key() !== '';
+		}
+
+		return false;
 	}
 
 	/**

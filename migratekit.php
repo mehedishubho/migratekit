@@ -3,7 +3,7 @@
  * Plugin Name:       MigrateKit
  * Plugin URI:        https://getMigrateKit.com
  * Description:       One-click WordPress migration, backup and restore. Database, media, themes and plugins in a single archive. Every feature included, free, forever — no extensions required.
- * Version:           0.0.2
+ * Version:           0.0.3
  * Requires at least: 5.6
  * Requires PHP:      7.4
  * Author:            MEHEDI HASSAN SHUBHO
@@ -26,12 +26,19 @@ if (defined('MIGRATEKIT_VERSION')) {
 	return;
 }
 
-define('MIGRATEKIT_VERSION', '0.0.2');
+define('MIGRATEKIT_VERSION', '0.0.3');
 define('MIGRATEKIT_PLUGIN_FILE', __FILE__);
 define('MIGRATEKIT_PLUGIN_BASENAME', plugin_basename(__FILE__));
 define('MIGRATEKIT_PATH', plugin_dir_path(__FILE__));
 define('MIGRATEKIT_URL', plugin_dir_url(__FILE__));
 define('MIGRATEKIT_SRC_PATH', MIGRATEKIT_PATH . 'src');
+
+/**
+ * Public Dropbox App key baked into the distribution so the Cloud page can
+ * offer a one-click connection (paste the displayed authorisation code).
+ * Empty until a key is set; users can always use their own Dropbox app.
+ */
+define('MIGRATEKIT_DROPBOX_APP_ID', '');
 
 require_once MIGRATEKIT_SRC_PATH . '/Support/Autoloader.php';
 \MigrateKit\Support\Autoloader::register('MigrateKit\\', MIGRATEKIT_SRC_PATH);

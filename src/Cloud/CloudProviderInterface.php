@@ -51,6 +51,16 @@ interface CloudProviderInterface {
 	public function authorize_url(): string;
 
 	/**
+	 * Begin an interactive connection. Returns the browser URL to open,
+	 * a state token that must travel with the follow-up exchange, and
+	 * whether the provider ends with a paste-a-code step instead of an
+	 * automatic redirect. Blank URL when the provider cannot connect.
+	 *
+	 * @return array{url:string,state:string,paste:bool}
+	 */
+	public function connect(): array;
+
+	/**
 	 * Preferred chunk size for uploads and ranged downloads (bytes).
 	 *
 	 * @return int

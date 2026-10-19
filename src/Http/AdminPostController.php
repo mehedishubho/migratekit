@@ -38,14 +38,14 @@ final class AdminPostController {
 		self::oauth_callback(
 			'dropbox',
 			'migratekit_cloud_dropbox',
-			static function (string $code): void {
+			static function (string $code, string $state): void {
 				$provider = Manager::provider(DropboxProvider::ID);
 
 				if ($provider === null || ! $provider instanceof DropboxProvider) {
 					throw new \RuntimeException('The Dropbox integration is misconfigured.');
 				}
 
-				$provider->authorize_code($code);
+				$provider->authorize_code($code, $state);
 			}
 		);
 	}
@@ -59,14 +59,14 @@ final class AdminPostController {
 		self::oauth_callback(
 			'gdrive',
 			'migratekit_cloud_gdrive',
-			static function (string $code): void {
+			static function (string $code, string $state): void {
 				$provider = Manager::provider(DriveProvider::ID);
 
 				if ($provider === null || ! $provider instanceof DriveProvider) {
 					throw new \RuntimeException('The Google Drive integration is misconfigured.');
 				}
 
-				$provider->authorize_code($code);
+				$provider->authorize_code($code, $state);
 			}
 		);
 	}
@@ -74,9 +74,9 @@ final class AdminPostController {
 	/**
 	 * Shared OAuth callback flow: permission, state, exchange, redirect.
 	 *
-	 * @param string              $id       Provider id (for URL notices).
-	 * @param string              $nonce    Nonce action for the state value.
-	 * @param callable(string):void $exchange Code exchange routine.
+	 * @param string               $id       Provider id (for URL notices).
+	 * @param string               $nonce    Nonce action for the state value.
+	 * @param callable(string,string):void $exchange Code exchange routine.
 	 * @return void
 	 */
 	private static function oauth_callback(string $id, string $nonce, callable $exchange): void {
@@ -104,7 +104,7 @@ final class AdminPostController {
 		}
 
 		try {
-			$exchange($code);
+			$exchange($code, $state);
 		} catch (\Throwable $e) {
 			wp_die(
 				sprintf('Connecting the storage account failed: %s. Return to the Cloud page and try again.', esc_html($e->getMessage())),

@@ -272,6 +272,26 @@ final class RestController {
 
 		register_rest_route(
 			self::REST_NAMESPACE,
+			'/cloud/providers/' . self::PROVIDER . '/connect',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( self::class, 'connect_provider' ),
+				'permission_callback' => array( self::class, 'can_export' ),
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
+			'/cloud/providers/' . self::PROVIDER . '/callback',
+			array(
+				'methods'             => 'POST',
+				'callback'            => array( self::class, 'callback_provider' ),
+				'permission_callback' => array( self::class, 'can_export' ),
+			)
+		);
+
+		register_rest_route(
+			self::REST_NAMESPACE,
 			'/cloud/providers/' . self::PROVIDER . '/test',
 			array(
 				'methods'             => 'POST',
@@ -424,6 +444,47 @@ final class RestController {
 			return new WP_REST_Response(array( 'providers' => Manager::status() ), 200);
 		} catch (\Throwable $e) {
 			return self::error($e, 400);
+		}
+	}
+
+	/**
+	 * @param mixed $request Request.
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public static function connect_provider($request) {
+		try {
+			$start = Manager::connecting((string) $request['provider_id']);
+
+			return new WP_REST_Response(
+				array(
+					'providers' => Manager::status(),
+					'url'       => $start['url'],
+					'state'     => $start['state'],
+					'paste'     => (bool) $start['paste'],
+				),
+				200
+			);
+		} catch (\Throwable $e) {
+			return self::error($e, 400);
+		}
+	}
+
+	/**
+	 * @param mixed $request Request.
+	 * @return WP_REST_Response|WP_Error
+	 */
+	public static function callback_provider($request) {
+		$params = self::params($request);
+		$code   = isset($params['code']) ? sanitize_text_field((string) $params['code']) : '';
+		$state  = isset($params['state']) ? sanitize_text_field((string) $params['state']) : '';
+
+		try {
+			Manager::exchanging((string) $request['provider_id'], $code, $state);
+			Manager::test((string) $request['provider_id']);
+
+			return new WP_REST_Response(array( 'providers' => Manager::status() ), 200);
+		} catch (\Throwable $e) {
+			return self::error($e, 502);
 		}
 	}
 

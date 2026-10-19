@@ -59,17 +59,65 @@ final class DriveProvider implements CloudProviderInterface {
 	 * @return array<string,mixed>
 	 */
 	public static function settings(array $input): array {
-		return array(
+		$parsed = array(
 			'client_id'     => isset($input['client_id']) ? trim((string) $input['client_id']) : '',
 			'client_secret' => isset($input['client_secret']) ? trim((string) $input['client_secret']) : '',
 			'folder'        => isset($input['folder']) ? trim((string) $input['folder'], "/ \t") : '',
 		);
+
+		$json = isset($input['service_account']) ? trim((string) $input['service_account']) : '';
+
+		if ($json !== '' && $json !== Manager::MASK) {
+			$decoded = json_decode($json, true);
+
+			if (! is_array($decoded) || ! isset($decoded['client_email']) || ! isset($decoded['private_key'])) {
+				throw new \RuntimeException('The Google service-account JSON is incomplete: client_email and private_key are required.');
+			}
+
+			$parsed['client_email'] = trim((string) $decoded['client_email']);
+			$parsed['private_key']  = (string) $decoded['private_key'];
+		}
+
+		return $parsed;
 	}
 
 	public function is_ready(): bool {
+		if ($this->service_account_ready()) {
+			return true;
+		}
+
 		return $this->field('client_id') !== ''
 			&& $this->field('client_secret') !== ''
 			&& $this->field('access_token') !== '';
+	}
+
+	/**
+	 * Whether the service-account key pair (the no-OAuth easy mode) is set.
+	 *
+	 * @return bool
+	 */
+	public function service_account_ready(): bool {
+		return $this->field('client_email') !== '' && $this->field('private_key') !== '';
+	}
+
+	/**
+	 * Which connection mode applies: 'service' (key paste) or 'oauth'.
+	 * Fresh installs land on the recommended service-account mode; an
+	 * OAuth-only setup keeps its mode.
+	 *
+	 * @return string
+	 */
+	public function auth_mode(): string {
+		if ($this->service_account_ready()) {
+			return 'service';
+		}
+
+		$has_oauth = $this->field('client_id') !== ''
+			|| $this->field('client_secret') !== ''
+			|| $this->field('refresh_token') !== ''
+			|| ( $this->field('access_token') !== '' && $this->field('client_id') !== '' );
+
+		return $has_oauth ? 'oauth' : 'service';
 	}
 
 	public function authorize_url(): string {
@@ -101,12 +149,37 @@ final class DriveProvider implements CloudProviderInterface {
 
 	public function display(): array {
 		return array(
-			'client_id'     => $this->field('client_id'),
-			'client_secret' => $this->field('client_secret') !== '' ? Manager::MASK : '',
-			'folder'        => $this->field('folder'),
-			'connected'     => $this->field('access_token') !== '',
-			'account'       => $this->field('account'),
-			'expires_at'    => (int) ( $this->config['expires_at'] ?? 0 ),
+			'client_id'       => $this->field('client_id'),
+			'client_secret'   => $this->field('client_secret') !== '' ? Manager::MASK : '',
+			'folder'          => $this->field('folder'),
+			'auth_mode'       => $this->auth_mode(),
+			'client_email'    => $this->field('client_email'),
+			'service_account' => $this->field('private_key') !== '' ? Manager::MASK : '',
+			'connected'       => $this->field('access_token') !== '' || $this->service_account_ready(),
+			'account'         => $this->field('account') !== '' ? $this->field('account') : $this->field('client_email'),
+			'expires_at'      => (int) ( $this->config['expires_at'] ?? 0 ),
+		);
+	}
+
+	public function connect(): array {
+		if ($this->field('client_id') === '' || self::redirect_url() === '') {
+			return array( 'url' => '', 'state' => '', 'paste' => false );
+		}
+
+		return array(
+			'url'   => self::AUTHORIZE . '?' . http_build_query(
+				array(
+					'response_type' => 'code',
+					'client_id'     => $this->field('client_id'),
+					'redirect_uri'  => self::redirect_url(),
+					'access_type'   => 'offline',
+					'prompt'        => 'consent',
+					'scope'         => 'https://www.googleapis.com/auth/drive',
+					'state'         => wp_create_nonce('migratekit_cloud_gdrive'),
+				)
+			),
+			'state' => '',
+			'paste' => false,
 		);
 	}
 
@@ -440,7 +513,8 @@ final class DriveProvider implements CloudProviderInterface {
 	}
 
 	/**
-	 * Drive request with token refresh retry.
+	 * Drive request with token refresh retry. Service accounts mint a
+	 * short-lived access token up front; OAuth clients refresh on a 401.
 	 *
 	 * @param string               $url    Endpoint.
 	 * @param string               $method HTTP method.
@@ -449,6 +523,10 @@ final class DriveProvider implements CloudProviderInterface {
 	 * @return array{status:int,headers:array<string,string>,body:string,error:string}
 	 */
 	private function api(string $url, string $method, array $extra, ?string $body): array {
+		if ($this->service_account_ready()) {
+			$this->ensure_service_token();
+		}
+
 		$headers = array_merge(
 			array( 'Authorization' => 'Bearer ' . $this->field('access_token') ),
 			$extra
@@ -456,7 +534,7 @@ final class DriveProvider implements CloudProviderInterface {
 
 		$response = Transport::send($method, $url, $headers, $body, 60, $this->transport());
 
-		if ($response['status'] === 401 && $this->field('refresh_token') !== '') {
+		if ($response['status'] === 401 && ! $this->service_account_ready() && $this->field('refresh_token') !== '') {
 			$this->refresh_token();
 
 			$headers = array_merge(
@@ -493,7 +571,6 @@ final class DriveProvider implements CloudProviderInterface {
 				'client_secret' => $this->field('client_secret'),
 			)
 		);
-
 		$response = Transport::send(
 			'POST',
 			self::TOKEN_URL,
@@ -511,6 +588,88 @@ final class DriveProvider implements CloudProviderInterface {
 
 		if (! is_array($decoded) || ! isset($decoded['access_token'])) {
 			throw new \RuntimeException('The Google refresh response could not be parsed.');
+		}
+
+		$expires = time() + (int) ( $decoded['expires_in'] ?? 3600 ) - 60;
+
+		Manager::store_tokens(self::ID, array(
+			'access_token' => (string) $decoded['access_token'],
+			'expires_at'   => $expires,
+		));
+
+		$this->config['access_token'] = (string) $decoded['access_token'];
+		$this->config['expires_at']   = $expires;
+	}
+
+	/**
+	 * Mint a fresh service-account access token when none is cached or the
+	 * cached one is within a minute of expiring.
+	 *
+	 * @return void
+	 */
+	private function ensure_service_token(): void {
+		$expires = (int) ( $this->config['expires_at'] ?? 0 );
+
+		if ($this->field('access_token') !== '' && $expires >= time() + 60) {
+			return;
+		}
+
+		$this->mint_service_token();
+	}
+
+	/**
+	 * Exchange a signed JWT for an access token (service account flow).
+	 *
+	 * @return void
+	 */
+	private function mint_service_token(): void {
+		$header = self::b64url((string) json_encode(array( 'alg' => 'RS256', 'typ' => 'JWT' )));
+		$issued = time();
+		$claims = json_encode(
+			array(
+				'iss'   => $this->field('client_email'),
+				'scope' => 'https://www.googleapis.com/auth/drive',
+				'aud'   => self::TOKEN_URL,
+				'exp'   => $issued + 3600,
+				'iat'   => $issued,
+			)
+		);
+
+		if ($claims === false) {
+			throw new \RuntimeException('Could not encode the Google service-account claims.');
+		}
+
+		$payload = $header . '.' . self::b64url($claims);
+		$signed  = '';
+
+		if (openssl_sign($payload, $signed, $this->field('private_key'), OPENSSL_ALGO_SHA256) !== true) {
+			throw new \RuntimeException('The Google service-account private key could not sign the token request.');
+		}
+
+		$assertion = $payload . '.' . rtrim(strtr(base64_encode($signed), '+/', '-_'), '=');
+
+		$response = Transport::send(
+			'POST',
+			self::TOKEN_URL,
+			array( 'Content-Type' => 'application/x-www-form-urlencoded' ),
+			http_build_query(
+				array(
+					'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+					'assertion'  => $assertion,
+				)
+			),
+			30,
+			$this->transport()
+		);
+
+		if ($response['status'] !== 200) {
+			throw new \RuntimeException($this->message('Minting the Google service-account token failed', $response));
+		}
+
+		$decoded = json_decode($response['body'], true);
+
+		if (! is_array($decoded) || ! isset($decoded['access_token'])) {
+			throw new \RuntimeException('The Google service-account token response could not be parsed.');
 		}
 
 		$expires = time() + (int) ( $decoded['expires_in'] ?? 3600 ) - 60;
@@ -559,5 +718,15 @@ final class DriveProvider implements CloudProviderInterface {
 		}
 
 		return substr(trim($body), 0, 160);
+	}
+
+	/**
+	 * URL-safe base64 without padding.
+	 *
+	 * @param string $value Raw bytes.
+	 * @return string
+	 */
+	private static function b64url(string $value): string {
+		return rtrim(strtr(base64_encode($value), '+/', '-_'), '=');
 	}
 }

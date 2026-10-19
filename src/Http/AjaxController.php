@@ -45,6 +45,8 @@ final class AjaxController {
 			'migratekit_reset_step'     => 'reset_step',
 			'migratekit_cloud_status'   => 'cloud_status',
 			'migratekit_cloud_save'     => 'cloud_save',
+			'migratekit_cloud_connect'  => 'cloud_connect',
+			'migratekit_cloud_callback' => 'cloud_callback',
 			'migratekit_cloud_test'     => 'cloud_test',
 			'migratekit_cloud_disconnect' => 'cloud_disconnect',
 			'migratekit_cloud_files'    => 'cloud_files',
@@ -423,6 +425,55 @@ final class AjaxController {
 			wp_send_json_success(array( 'providers' => Manager::status() ));
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 400);
+		}
+	}
+
+	/**
+	 * @return void
+	 */
+	public static function cloud_connect(): void {
+		self::guard(Capabilities::EXPORT);
+
+		$provider = self::cloud_provider_id();
+
+		try {
+			$start = Manager::connecting($provider);
+
+			wp_send_json_success(
+				array(
+					'providers' => Manager::status(),
+					'url'       => $start['url'],
+					'state'     => $start['state'],
+					'paste'     => (bool) $start['paste'],
+				)
+			);
+		} catch (\Throwable $e) {
+			wp_send_json_error(array( 'message' => $e->getMessage() ), 400);
+		}
+	}
+
+	/**
+	 * @return void
+	 */
+	public static function cloud_callback(): void {
+		self::guard(Capabilities::EXPORT);
+
+		$provider = self::cloud_provider_id();
+		$code     = isset($_POST['code']) ? sanitize_text_field((string) wp_unslash($_POST['code'])) : '';
+		$state    = isset($_POST['state']) ? sanitize_text_field((string) wp_unslash($_POST['state'])) : '';
+
+		try {
+			Manager::exchanging($provider, $code, $state);
+
+			try {
+				Manager::test($provider);
+			} catch (\Throwable $e) {
+				// The connection succeeded; the check pulse is best effort.
+			}
+
+			wp_send_json_success(array( 'providers' => Manager::status() ));
+		} catch (\Throwable $e) {
+			wp_send_json_error(array( 'message' => $e->getMessage() ), 502);
 		}
 	}
 

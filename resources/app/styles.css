@@ -471,3 +471,50 @@
 	gap: 10px;
 }
 
+
+/* Segmented control (connection type toggle). */
+.mk-seg {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 6px;
+	padding: 4px;
+	border: 1px solid var(--mk-border);
+	border-radius: 10px;
+	background: var(--mk-panel);
+}
+
+.mk-seg-btn {
+	border: 0;
+	background: transparent;
+	padding: 8px 10px;
+	border-radius: 7px;
+	font: inherit;
+	cursor: pointer;
+}
+
+.mk-seg-btn.active {
+	background: var(--mk-accent-soft, #eef2ff);
+	color: var(--mk-accent, #3f51b5);
+	font-weight: 600;
+}
+
+/* Service account key paste. */
+.mk-textarea {
+	width: 100%;
+	min-height: 130px;
+	padding: 10px 12px;
+	border: 1px solid var(--mk-border);
+	border-radius: 10px;
+	font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	resize: vertical;
+}
+
+/* Short step lists next to connect flows. */
+.mk-steps {
+	margin: 6px 0 0;
+	padding-left: 22px;
+	display: grid;
+	gap: 6px;
+	color: var(--mk-muted, #556);
+	font-size: 13px;
+}
