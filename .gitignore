@@ -1,8 +1,19 @@
-# Lab-level exclusions — these are never part of MigrateKit's history.
-# (reference copy used only for behavior study)
+# Build/runtime artifacts.
+/vendor/
+/node_modules/
+/build/
+/storage/
+/.phpunit.cache/
+/.phpunit.result.cache
+/tests/tmp/
+*.log
+
+# Lab exclusions — analysis material, never part of the plugin's history.
 /all-in-one-wp-migration/
 /rea/
 /.commandcode/
-/tools/
+
+# OS noise.
+.DS_Store
 Thumbs.db
 desktop.ini
