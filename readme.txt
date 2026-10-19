@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 0.0.1
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -65,7 +65,7 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 
 == Changelog ==
 
-= 1.0.0 =
+= 0.0.1 =
 * Initial public release.
 * One-click export/import with serialized-safe replacement and resumable chunked uploads.
 * Backups page with labels, archive browser, single-file download and bulk delete.
@@ -78,5 +78,5 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 
 == Upgrade Notice ==
 
-= 1.0.0 =
+= 0.0.1 =
 First public release.

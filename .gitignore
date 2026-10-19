@@ -3,6 +3,7 @@
 /node_modules/
 /build/
 /storage/
+/releases/
 /.phpunit.cache/
 /.phpunit.result.cache
 /tests/tmp/
