@@ -36,12 +36,14 @@ final class AssetLoader {
 		$manifest = self::manifest();
 
 		if ($manifest === null) {
+			add_action('admin_notices', array( 'MigrateKit\\Admin\\AssetLoader', 'missing_build_notice' ));
 			return;
 		}
 
 		$entry = isset($manifest['resources/app/main.ts']) ? $manifest['resources/app/main.ts'] : null;
 
 		if (! is_array($entry) || empty($entry['file'])) {
+			add_action('admin_notices', array( 'MigrateKit\\Admin\\AssetLoader', 'missing_build_notice' ));
 			return;
 		}
 
@@ -104,6 +106,30 @@ final class AssetLoader {
 	}
 
 	/**
+	 * Warns when the compiled front-end is absent, which happens when the
+	 * plugin was installed from a source archive instead of the release ZIP.
+	 *
+	 * @return void
+	 */
+	public static function missing_build_notice(): void {
+		printf(
+			'<div class="notice notice-error"><p>%s</p></div>',
+			wp_kses(
+				__(
+					'<strong>MigrateKit:</strong> the compiled application is missing (<code>build/.vite/manifest.json</code>). This happens when the plugin is installed from a source archive instead of the release ZIP. Reinstall the plugin using the <code>migratekit</code> ZIP attached to the release.',
+					'migratekit'
+				),
+				array(
+					'strong' => array(),
+					'code'   => array(),
+				)
+			)
+		);
+	}
+
+	/**
+	 * Reads the Vite manifest so the hashed bundle names can be resolved.
+	 *
 	 * @return array<string,mixed>|null
 	 */
 	private static function manifest(): ?array {

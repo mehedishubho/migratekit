@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.1
+Stable tag: 0.0.2
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -65,6 +65,9 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 
 == Changelog ==
 
+= 0.0.2 =
+* Adds an explanatory admin notice when the compiled front-end assets are missing, for example after installing from a source archive instead of the release ZIP. Previously this showed blank admin pages.
+
 = 0.0.1 =
 * Initial public release.
 * One-click export/import with serialized-safe replacement and resumable chunked uploads.
@@ -77,6 +80,9 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 * WP-CLI commands and a REST API covering every operation.
 
 == Upgrade Notice ==
+
+= 0.0.2 =
+If you installed from a *Source code* archive and saw white MigrateKit pages, install the release ZIP instead; 0.0.2 now also shows an explanatory notice when the compiled front-end is missing.
 
 = 0.0.1 =
 First public release.

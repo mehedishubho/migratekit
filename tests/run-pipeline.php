@@ -227,7 +227,7 @@ check_pl('content stage did not duplicate uploads', 1 === count(array_keys($path
 
 $package = json_decode($reader->read($reader->find('package.json')), true);
 same_pl('manifest site URL', 'http://old.test', $package['SiteURL']);
-same_pl('manifest plugin version', '1.0.0', $package['Plugin']['Version']);
+same_pl('manifest plugin version', '0.0.1', $package['Plugin']['Version']);
 same_pl('manifest no-post-revisions flag', true, $package['NoPostRevisions']);
 same_pl('manifest database prefix', 'wp_', $package['Database']['Prefix']);
 same_pl('manifest server htaccess encoded', base64_encode("deny from all\n"), $package['Server']['.htaccess']);

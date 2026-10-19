@@ -61,7 +61,7 @@ final class ExportConfig {
 		}
 
 		$config['Plugin'] = array(
-			'Version' => defined('MIGRATEKIT_VERSION') ? MIGRATEKIT_VERSION : '0.0.1',
+			'Version' => defined('MIGRATEKIT_VERSION') ? MIGRATEKIT_VERSION : '0.0.2',
 		);
 
 		$config['WordPress'] = array(
