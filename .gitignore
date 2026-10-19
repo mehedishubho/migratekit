@@ -1,0 +1,7 @@
+# Lab-level exclusions — these are never part of MigrateKit's history.
+# (reference copy used only for behavior study)
+/all-in-one-wp-migration/
+/rea/
+/.commandcode/
+Thumbs.db
+desktop.ini
