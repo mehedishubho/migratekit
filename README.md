@@ -19,11 +19,11 @@ Core engine, every pipeline, the cloud storage layer and multisite support are i
 | Export pipeline (prepare → manifest → enumerate → archive content/media/plugins/themes → DB dump → finalize) | Done, resumable |
 | Import pipeline (validate → CRC → password → extract → DB import with URL/path replacement) | Done |
 | Backups repository, capabilities, secret key, job status | Done |
-| WordPress admin (Vue 3 + Vite: Export/Import/Backups with live progress) | Done |
+| WordPress admin (Vue 3 + Vite: Dashboard, Export/Import/Backups, Cloud, Schedules, Reset — live progress, cron-health warnings, one-click starter schedule) | Done |
 | WordPress wiring (menu, asset loading, AJAX job endpoints, backup download) | Done |
 | REST API (`migratekit/v1`: async jobs, logs, backups, one-click restore) | Done |
 | WP-CLI (`export`, `backup`, `import`, `restore`, `backups`, `label`, `files`, `reset`; `cloud list/test/files/push/pull`) | Done |
-| Scheduled backups (hourly → monthly), retention by count/age, email notifications, network scope, Schedules UI | Done |
+| Scheduled backups (hourly → monthly), retention by count/age, email notifications, network scope, Schedules UI — cron runs plus an in-browser Run now with live progress | Done |
 | Reset Hub (site reset: content tables, transients, optional media files/users/plugin tables; safety backup; typed confirmation) | Done |
 | Cloud storage (S3-compatible + Dropbox + Google Drive: push/pull, settings UI, WP-CLI, scheduled cloud copies) | Done |
 | Multisite (whole-network and per-site export/import, native and bundled) | Done |

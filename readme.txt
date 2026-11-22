@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.3
+Stable tag: 0.0.11
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -65,31 +65,30 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 
 == Changelog ==
 
-= 0.0.3 =
-* Cloud connections made easy: Dropbox connects in one click from the Cloud page (paste the shown authorisation code; no app setup), and Google Drive accepts a service-account JSON key the same way, no OAuth client required.
-* S3 settings gained guided console links.
-
-= 0.0.2 =
-* Adds an explanatory admin notice when the compiled front-end assets are missing, for example after installing from a source archive instead of the release ZIP. Previously this showed blank admin pages.
+= 0.0.11 =
+* Responsive admin layout — the app now fills wide screens and adapts to tablets and phones instead of hugging a fixed width.
+* Live progress for exports, imports, restores and cloud transfers: the percentage climbs continuously instead of sitting at 0% until the end.
+* Reliable backup downloads: output buffering or compression enabled by other plugins can no longer corrupt or block the downloaded archive.
+* Exports and imports survive transient request failures — a stalled step retries instead of aborting the whole job.
 
 = 0.0.1 =
 * Initial public release.
 * One-click export/import with serialized-safe replacement and resumable chunked uploads.
 * Backups page with labels, archive browser, single-file download and bulk delete.
-* Cloud storage for S3-compatible buckets, Dropbox and Google Drive, with scheduled cloud copies.
-* Scheduled backups with retention rules and email notifications.
+* Cloud storage for S3-compatible buckets, Dropbox and Google Drive, with scheduled cloud copies. Dropbox connects in one click (paste the shown authorisation code; no app setup), Google Drive accepts a service-account JSON key the same way, and S3 settings gained guided console links.
+* Scheduled backups with retention rules, email notifications and network scope — an armed Next-run indicator with cron-health warnings, plus an in-browser Run now with live progress.
+* Dashboard landing page with a one-click backup, a guided migration path and a one-click daily starter schedule.
 * Reset Hub with safety backup and typed confirmation.
 * Native multisite support (whole network or per-site).
 * Password-protected (AES-256-CBC) archives.
 * WP-CLI commands and a REST API covering every operation.
+* Maintenance screen during imports and restores.
+* Explanatory admin notice when the compiled front-end is missing (for example after installing from a source archive instead of the release ZIP).
 
 == Upgrade Notice ==
 
-= 0.0.3 =
-Cloud storage is now one-click for Dropbox and paste-a-key simple for Google Drive.
-
-= 0.0.2 =
-If you installed from a *Source code* archive and saw white MigrateKit pages, install the release ZIP instead; 0.0.2 now also shows an explanatory notice when the compiled front-end is missing.
+= 0.0.11 =
+Responsive layout for all screens, live progress percentages and reliable backup downloads. Update recommended.
 
 = 0.0.1 =
 First public release.

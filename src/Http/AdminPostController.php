@@ -139,14 +139,7 @@ final class AdminPostController {
 			wp_die('Backup not found.', '', array( 'response' => 404 ));
 		}
 
-		nocache_headers();
-		header('Content-Type: application/octet-stream');
-		header('Content-Disposition: attachment; filename="' . $backup['name'] . '"');
-		header('Content-Length: ' . (string) $backup['size']);
-		header('X-Content-Type-Options: nosniff');
-
-		readfile($backup['path']);
-		exit;
+		self::stream_file($backup['path'], $backup['name'], (int) $backup['size']);
 	}
 
 	/**
@@ -200,6 +193,11 @@ final class AdminPostController {
 			}
 
 			$reader->extract($entry, $temp);
+
+			// stream_file() exits; clean the temp file on shutdown instead.
+			register_shutdown_function(static function () use ($temp): void {
+				@unlink($temp);
+			});
 		} catch (\Throwable $e) {
 			wp_die(
 				sprintf('The file could not be read from this backup: %s', esc_html($e->getMessage())),
@@ -208,14 +206,44 @@ final class AdminPostController {
 			);
 		}
 
+		self::stream_file($temp, basename($entry->name()), (int) filesize($temp));
+		@unlink($temp);
+	}
+
+	/**
+	 * Stream a file as an attachment. WordPress loads fully before this runs,
+	 * so other plugins' output buffers and zlib compression are cleared first;
+	 * otherwise the browser receives a corrupt or empty download.
+	 *
+	 * @param string $path Absolute file path.
+	 * @param string $name Download filename.
+	 * @param int    $size Byte length.
+	 * @return void
+	 */
+	private static function stream_file(string $path, string $name, int $size): void {
+		if (function_exists('wp_raise_memory_limit')) {
+			wp_raise_memory_limit('admin');
+		}
+
+		if (function_exists('set_time_limit')) {
+			@set_time_limit(300);
+		}
+
+		while (ob_get_level() > 0) {
+			ob_end_clean();
+		}
+
+		if (function_exists('ini_set')) {
+			@ini_set('zlib.output_compression', '0');
+		}
+
 		nocache_headers();
 		header('Content-Type: application/octet-stream');
-		header('Content-Disposition: attachment; filename="' . basename($entry->name()) . '"');
-		header('Content-Length: ' . (string) filesize($temp));
+		header('Content-Disposition: attachment; filename="' . $name . '"');
+		header('Content-Length: ' . (string) $size);
 		header('X-Content-Type-Options: nosniff');
 
-		readfile($temp);
-		@unlink($temp);
+		readfile($path);
 		exit;
 	}
 }

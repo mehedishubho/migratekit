@@ -54,6 +54,49 @@ sched_ok('last_run timestamp set', $reloaded !== null && (int) $reloaded['last_r
 $repository = new \MigrateKit\Storage\BackupsRepository();
 sched_ok('scheduled backup created', count($repository->list()) >= 1);
 
+// --- Cron::next_run (powering the Schedules page "Next run" column) ---
+$next_run = \MigrateKit\Scheduler\Cron::next_run($schedule['id']);
+sched_ok('next_run matches the queued cron event', $next_run === (int) $next);
+sched_ok('next_run unarmed id resolves to 0', \MigrateKit\Scheduler\Cron::next_run('nope') === 0);
+
+// --- Inline Run now: start_inline drives via export steps, finish_inline records ---
+$finished_twice = false;
+
+try {
+	\MigrateKit\Scheduler\Cron::finish_inline($schedule['id'], 'not-a-job');
+} catch (\Throwable $e) {
+	$finished_twice = true;
+}
+sched_ok('finish rejects unbound job', $finished_twice);
+
+$first = \MigrateKit\Scheduler\Cron::start_inline($schedule['id']);
+sched_ok('inline start returns a live export job', (string) $first['type'] === 'export' && empty($first['done']));
+
+$refused = false;
+
+try {
+	\MigrateKit\Scheduler\Cron::start_inline($schedule['id']);
+} catch (\Throwable $e) {
+	$refused = strpos((string) $e->getMessage(), 'already running') !== false;
+}
+sched_ok('double start refused while running', $refused);
+
+$guard = 0;
+do {
+	$first = \MigrateKit\Job\Runner::advance((string) $first['id']);
+	if (++$guard > 100000) {
+		break;
+	}
+} while (empty($first['done']));
+sched_ok('inline export finished', ! empty($first['done']));
+
+$finished  = \MigrateKit\Scheduler\Cron::finish_inline($schedule['id'], (string) $first['id']);
+$reloaded2 = \MigrateKit\Scheduler\Schedule::get($schedule['id']);
+sched_ok('inline finish recorded success', isset($finished['status']) && strpos((string) $finished['status'], 'Success') === 0);
+sched_ok('inline status stored on schedule', $reloaded2 !== null && (string) $reloaded2['last_status'] === (string) $finished['status']);
+sched_ok('binding cleared after finish', get_transient(\MigrateKit\Scheduler\Cron::INLINE_BINDING_PREFIX . $schedule['id']) === false);
+
+// --- Retention (count-based, standalone of any schedule) ---
 $directory = \MigrateKit\Support\Paths::backups();
 
 for ($i = 0; $i < 4; $i++) {

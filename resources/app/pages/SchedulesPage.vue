@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { config, formatDate, post } from '../api';
+import { config, formatDate, friendlyInterval, inWords, intervalSeconds, post, runJob, type JobState } from '../api';
+import { saveStarterSchedule } from '../presets';
 
 interface ScheduleOptions {
 	compression: string;
@@ -26,15 +27,22 @@ interface Schedule {
 	notify_email: string;
 	last_run: number;
 	last_status: string;
+	next_run?: number;
 }
 
 const schedules = ref<Schedule[]>([]);
 const intervals = ref<string[]>(['hourly', 'twicedaily', 'daily', 'weekly', 'monthly']);
 const cloudProviders = ref<Array<{ id: string; label: string; ready: boolean }>>([]);
+const adminEmail = ref('');
 const editing = ref<Schedule | null>(null);
 const loading = ref(false);
 const error = ref('');
 const notice = ref('');
+const starterBusy = ref(false);
+
+/** An in-browser Run now: the export job state plus the schedule label. */
+const activeRun = ref<{ name: string } | null>(null);
+const runJobState = ref<JobState | null>(null);
 
 function blank(): Schedule {
 	return {
@@ -56,7 +64,7 @@ function blank(): Schedule {
 		cloud_provider: '',
 		retention_count: 0,
 		retention_days: 0,
-		notify_email: '',
+		notify_email: adminEmail.value,
 		last_run: 0,
 		last_status: '',
 	};
@@ -67,9 +75,12 @@ async function load(): Promise<void> {
 	error.value = '';
 
 	try {
-		const data = await post<{ schedules: Schedule[]; intervals: string[] }>('migratekit_schedules_list');
+		const data = await post<{ schedules: Schedule[]; intervals: string[]; admin_email?: string }>(
+			'migratekit_schedules_list'
+		);
 		schedules.value = data.schedules;
 		intervals.value = data.intervals;
+		adminEmail.value = typeof data.admin_email === 'string' ? data.admin_email : '';
 
 		const cloud = await post<{ providers: Array<{ id: string; label: string; ready: boolean }> }>(
 			'migratekit_cloud_status'
@@ -128,12 +139,36 @@ async function save(): Promise<void> {
 
 	try {
 		await post('migratekit_schedule_save', payload(editing.value));
-		notice.value = 'Schedule saved.';
+		const wasNew = editing.value.id === '';
+		notice.value = wasNew ? 'Schedule saved — it is now armed and will run on its own.' : 'Schedule saved.';
 		editing.value = null;
 		error.value = '';
 		await load();
 	} catch (caught) {
 		error.value = caught instanceof Error ? caught.message : 'Unable to save the schedule.';
+	}
+}
+
+/**
+ * One click → a sensible default schedule: daily gzip archive, newest 14
+ * kept, and an email after every run addressed to the site admin.
+ */
+async function createStarter(): Promise<void> {
+	if (starterBusy.value) {
+		return;
+	}
+
+	starterBusy.value = true;
+	error.value = '';
+
+	try {
+		await saveStarterSchedule(adminEmail.value);
+		notice.value = 'Automatic backups are on — one runs every day, and you get an email after each one.';
+		await load();
+	} catch (caught) {
+		error.value = caught instanceof Error ? caught.message : 'Unable to create the schedule.';
+	} finally {
+		starterBusy.value = false;
 	}
 }
 
@@ -151,16 +186,111 @@ async function remove(schedule: Schedule): Promise<void> {
 }
 
 async function runNow(schedule: Schedule): Promise<void> {
+	if (activeRun.value) {
+		return;
+	}
+
+	activeRun.value = { name: schedule.name };
+	runJobState.value = null;
+	error.value = '';
+	notice.value = `"${schedule.name}" is running now — keep this tab open until the progress bar completes.`;
+
+	let jobId = '';
+
 	try {
-		await post('migratekit_schedule_run', { id: schedule.id });
-		notice.value = 'Backup queued. It runs on the next cron tick.';
-		error.value = '';
+		const state = await runJob(
+			post<JobState>('migratekit_schedule_start', { id: schedule.id }),
+			'migratekit_export_step',
+			(current) => {
+				runJobState.value = current;
+			},
+		);
+
+		jobId = state.id;
+
+		const result = await post<{ status: string }>('migratekit_schedule_finish', {
+			id: schedule.id,
+			job_id: state.id,
+		});
+
+		const status = result.status.replace(/^(Success|Failed):\s*/, '');
+
+		if (result.status.startsWith('Failed')) {
+			error.value = `The backup failed: ${status}`;
+		} else {
+			notice.value = `Backup finished: ${status}`;
+		}
 	} catch (caught) {
-		error.value = caught instanceof Error ? caught.message : 'Unable to queue the backup.';
+		const message = caught instanceof Error ? caught.message : 'The backup failed.';
+
+		// The job started but did not run through: record the failure so the
+		// schedule history and the notification email stay truthful.
+		if (jobId !== '') {
+			try {
+				const result = await post<{ status: string }>('migratekit_schedule_finish', {
+					id: schedule.id,
+					job_id: jobId,
+				});
+
+				error.value = result.status.startsWith('Failed')
+					? `The backup failed: ${result.status.replace(/^Failed:\s*/, '')}`
+					: `The backup failed: ${message}`;
+			} catch (recordError) {
+				const extra = recordError instanceof Error ? recordError.message : '';
+				error.value = extra === '' ? message : `${message} (${extra})`;
+			}
+		} else {
+			error.value = message;
+		}
+	} finally {
+		runJobState.value = null;
+		activeRun.value = null;
+		await load();
 	}
 }
 
 onMounted(load);
+
+/** "in 2h 5m", "Due now", "Paused", "Not armed". */
+function nextRunLabel(schedule: Schedule): string {
+	if (!schedule.enabled) {
+		return 'Paused';
+	}
+
+	if (!schedule.next_run) {
+		return 'Not armed';
+	}
+
+	const diff = schedule.next_run - Date.now();
+
+	return diff <= 60_000 ? 'Due now' : `in ${inWords(diff / 1000)}`;
+}
+
+/** Skippable plain-language warnings about the schedule's cron health. */
+function scheduleWarning(schedule: Schedule): string {
+	if (!schedule.enabled) {
+		return '';
+	}
+
+	const now = Date.now();
+
+	if (!schedule.next_run) {
+		return 'No run is queued — save the schedule again (or press Run now) to arm it.';
+	}
+
+	if (schedule.next_run < now) {
+		return `Was due ${inWords((now - schedule.next_run) / 1000)} ago — cron fires when someone visits the site, so quiet sites run late.`;
+	}
+
+	if (
+		schedule.last_run &&
+		now / 1000 - schedule.last_run > intervalSeconds(schedule.interval) * 1.5 + 7200
+	) {
+		return `Last ran ${formatDate(schedule.last_run)} — that is more than one full ${friendlyInterval(schedule.interval).toLowerCase()} cycle ago; the schedule may not be firing.`;
+	}
+
+	return '';
+}
 </script>
 
 <template>
@@ -168,13 +298,21 @@ onMounted(load);
 		<div class="mk-card-head">
 			<div>
 				<h2>Scheduled backups</h2>
-				<p class="mk-muted">Create automatic backups and optionally prune older ones.</p>
+				<p class="mk-muted">Set it up once — fresh backups are made automatically, and old ones are pruned for you.</p>
 			</div>
 			<button class="mk-btn" type="button" @click="createNew">New schedule</button>
 		</div>
 
 		<p v-if="error" class="mk-error">{{ error }}</p>
 		<p v-if="notice" class="mk-success">{{ notice }}</p>
+
+		<div v-if="activeRun" class="mk-progress" role="status" aria-live="polite">
+			<div class="mk-bar"><span :style="{ width: (runJobState?.percent ?? 0) + '%' }"></span></div>
+			<div class="mk-progress-meta">
+				<span>{{ activeRun.name }} — {{ runJobState?.message || 'Starting…' }}</span>
+				<span>{{ runJobState?.percent ?? 0 }}%</span>
+			</div>
+		</div>
 
 		<div v-if="editing" class="mk-editor">
 			<h3>{{ editing.id ? 'Edit schedule' : 'New schedule' }}</h3>
@@ -183,14 +321,16 @@ onMounted(load);
 				<label class="mk-field">
 					<span>Name</span>
 					<input v-model="editing.name" type="text" maxlength="100" placeholder="Daily backup" />
+					<em>Just for you — call it anything, e.g. "Client site – weekly".</em>
 				</label>
 				<label class="mk-field">
-					<span>Frequency</span>
+					<span>Runs</span>
 					<select v-model="editing.interval">
 						<option v-for="interval in intervals" :key="interval" :value="interval">
-							{{ interval }}
+							{{ friendlyInterval(interval) }}
 						</option>
 					</select>
+					<em>How often a backup is taken.</em>
 				</label>
 				<label class="mk-field">
 					<span>Compression</span>
@@ -199,6 +339,7 @@ onMounted(load);
 						<option value="gzip">gzip</option>
 						<option value="bzip2">bzip2</option>
 					</select>
+					<em>None is fastest. gzip/bzip2 shrink the archive but take longer.</em>
 				</label>
 				<label v-if="config.isMultisite" class="mk-field">
 					<span>Scope</span>
@@ -210,18 +351,22 @@ onMounted(load);
 				<label class="mk-field">
 					<span>Password <em>optional</em></span>
 					<input v-model="editing.options.password" type="password" autocomplete="new-password" />
+					<em>Encrypts the archive. You must type it again to restore — keep it somewhere safe.</em>
 				</label>
 				<label class="mk-field">
 					<span>Keep newest <em>0 = keep all</em></span>
 					<input v-model.number="editing.retention_count" type="number" min="0" step="1" />
+					<em>After every run, backups beyond this count are removed automatically.</em>
 				</label>
 				<label class="mk-field">
 					<span>Keep days <em>0 = ignore age</em></span>
 					<input v-model.number="editing.retention_days" type="number" min="0" step="1" />
+					<em>Backups older than this many days are removed after every run.</em>
 				</label>
 				<label class="mk-field">
 					<span>Notify email <em>optional</em></span>
-					<input v-model="editing.notify_email" type="email" placeholder="admin@example.com" />
+					<input v-model="editing.notify_email" type="email" :placeholder="adminEmail || 'admin@example.com'" />
+					<em>Sends an email after every run, success or failure, so you always know it worked.</em>
 				</label>
 				<label class="mk-check mk-check-inline">
 					<input v-model="editing.enabled" type="checkbox" />
@@ -235,6 +380,7 @@ onMounted(load);
 							{{ provider.label }} — push after every backup
 						</option>
 					</select>
+					<em>Every finished backup is also uploaded to this provider (connect one under Cloud).</em>
 				</label>
 			</div>
 
@@ -256,38 +402,48 @@ onMounted(load);
 
 		<div v-if="!loading && schedules.length === 0 && !editing" class="mk-empty">
 			<strong>No schedules yet</strong>
-			<span>Create one to automate your backups.</span>
+			<span>Turn this on once and your site backs itself up every day — keeping the newest 14 and emailing you each run.</span>
+			<button class="mk-btn" type="button" :disabled="starterBusy" @click="createStarter">
+				{{ starterBusy ? 'Turning on…' : 'Turn on daily backups' }}
+			</button>
+			<button class="mk-link" type="button" @click="createNew">Or build a custom schedule</button>
 		</div>
 
 		<table v-else-if="schedules.length > 0" class="mk-table">
 			<thead>
 				<tr>
 					<th>Name</th>
-					<th>Frequency</th>
+					<th>Runs</th>
+					<th>Next run</th>
 					<th>Cloud copy</th>
-					<th>Status</th>
 					<th>Last run</th>
 					<th class="mk-right">Actions</th>
 				</tr>
 			</thead>
 			<tbody>
 				<tr v-for="schedule in schedules" :key="schedule.id">
-					<td>{{ schedule.name }}</td>
-					<td>{{ schedule.interval }}</td>
+					<td>
+						{{ schedule.name }}
+						<span class="mk-status">{{ schedule.enabled ? 'Enabled' : 'Paused' }}</span>
+					</td>
+					<td>{{ friendlyInterval(schedule.interval) }}</td>
+					<td>
+						{{ nextRunLabel(schedule) }}
+						<p v-if="scheduleWarning(schedule)" class="mk-warn">{{ scheduleWarning(schedule) }}</p>
+					</td>
 					<td>
 						{{
 							cloudProviders.find((provider) => provider.id === schedule.cloud_provider)?.label ||
 							(schedule.cloud_provider ? schedule.cloud_provider : '—')
 						}}
 					</td>
-					<td>{{ schedule.enabled ? 'Enabled' : 'Paused' }}</td>
 					<td>
 						{{ schedule.last_run ? formatDate(schedule.last_run) : 'Never' }}
 						<span v-if="schedule.last_status" class="mk-status">{{ schedule.last_status }}</span>
 					</td>
 					<td class="mk-right">
 						<button class="mk-link" type="button" @click="edit(schedule)">Edit</button>
-						<button class="mk-link" type="button" @click="runNow(schedule)">Run now</button>
+						<button class="mk-link" type="button" :disabled="activeRun !== null" @click="runNow(schedule)">Run now</button>
 						<button class="mk-link mk-link-danger" type="button" @click="remove(schedule)">Delete</button>
 					</td>
 				</tr>

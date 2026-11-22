@@ -318,7 +318,7 @@ onMounted(load);
 							Restore
 						</button>
 						<button class="mk-link" type="button" @click="explore(backup)">Browse</button>
-						<a class="mk-link" :href="backup.downloadUrl">Download</a>
+						<a class="mk-link" :href="backup.downloadUrl" :download="backup.name">Download</a>
 						<button
 							class="mk-link mk-link-danger"
 							type="button"

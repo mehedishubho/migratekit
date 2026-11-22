@@ -167,9 +167,16 @@ final class Runner {
 		$status = static function (string $message, ?int $percent = null) use (&$state): void {
 			$state['message'] = $message;
 
-			if ($percent !== null) {
-				$state['percent'] = $percent;
-			}
+			// A stage-reported percent is progress *within* that stage; blend it
+			// with the stage position so the browser sees continuous movement.
+			$total = isset($state['stage_total']) ? (int) $state['stage_total'] : 0;
+			$index = isset($state['stage_index']) ? (int) $state['stage_index'] : 0;
+			$local = $percent === null ? 0 : max(0, min(100, $percent));
+			$global = $total > 0
+				? (int) floor((( $index + ( $local / 100 )) / $total) * 100)
+				: $local;
+
+			$state['percent'] = max(0, min(100, max($global, (int) ( $state['percent'] ?? 0 ))));
 
 			Logger::append($state, $message);
 		};

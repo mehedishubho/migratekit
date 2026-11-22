@@ -24,6 +24,12 @@ final class Cron {
 	/** Age (seconds) at which finished (done) job storage is pruned. */
 	public const FINISHED_TTL = 86400;
 
+	/** Transient prefix binding a schedule to the job started inline. */
+	public const INLINE_BINDING_PREFIX = 'migratekit_sched_job_';
+
+	/** Lifetime of the binding (long enough for very large exports). */
+	public const INLINE_TTL = 21600;
+
 	private function __construct() {
 	}
 
@@ -48,6 +54,18 @@ final class Cron {
 		);
 
 		return $schedules;
+	}
+
+	/**
+	 * Unix time of the next queued run for a schedule (0 when unarmed).
+	 *
+	 * @param string $schedule_id Schedule identifier.
+	 * @return int
+	 */
+	public static function next_run(string $schedule_id): int {
+		$next = wp_next_scheduled(self::HOOK, array( $schedule_id ));
+
+		return $next === false ? 0 : (int) $next;
 	}
 
 	/**
@@ -190,44 +208,179 @@ final class Cron {
 		$started = time();
 
 		try {
-			$state    = Runner::start_export($schedule['options']);
-			$job_id   = $state['id'];
-			$guard    = 0;
-			$deadline = microtime(true) + 300;
+			$archive = self::drive_export($schedule['options']);
 
-			do {
-				$state = Runner::advance($job_id);
-
-				if (++$guard > 100000 || microtime(true) > $deadline) {
-					break;
-				}
-			} while (empty($state['done']));
-
-			if (empty($state['done'])) {
+			if ($archive === '') {
 				throw new \RuntimeException('The scheduled backup did not finish.');
 			}
 
-			$deleted = Retention::apply($schedule);
-			$status  = 'Success: ' . (string) $state['archiveName'];
-
-			if ($deleted > 0) {
-				$status .= sprintf(' (%d old backups removed)', $deleted);
-			}
-
-			$status .= self::push_to_cloud($schedule, (string) $state['archiveName']);
-
-			Schedule::update_runtime($schedule['id'], $started, $status);
-			Notifier::send($schedule, true, $status);
+			self::complete_run($schedule, $started, $archive);
 		} catch (\Throwable $e) {
-			$status = 'Failed: ' . $e->getMessage();
-
-			Schedule::update_runtime($schedule['id'], $started, $status);
-			Notifier::send($schedule, false, $status);
-
-			if (defined('WP_CLI') && WP_CLI) {
-				\WP_CLI::warning($status);
-			}
+			self::fail_run($schedule, $started, $e->getMessage());
 		}
+	}
+
+	/**
+	 * Start a schedule's backup immediately and return the export job state
+	 * for step-by-step driving from the browser. finish_inline() records
+	 * retention, cloud push, runtime status and the notification once the
+	 * job completes.
+	 *
+	 * @param string $schedule_id Schedule identifier.
+	 * @return array<string,mixed> Export job state.
+	 */
+	public static function start_inline(string $schedule_id): array {
+		$schedule = Schedule::get($schedule_id);
+
+		if ($schedule === null) {
+			throw new \RuntimeException('Schedule not found.');
+		}
+
+		$binding = self::INLINE_BINDING_PREFIX . $schedule['id'];
+		$bound   = get_transient($binding);
+		$bound   = is_string($bound) ? $bound : '';
+
+		if ($bound !== '' && self::job_unfinished($bound)) {
+			throw new \RuntimeException('A backup for this schedule is already running. Reload the page to reconnect, or wait for it to finish.');
+		}
+
+		$state = Runner::start_export($schedule['options']);
+
+		set_transient($binding, (string) $state['id'], self::INLINE_TTL);
+
+		return $state;
+	}
+
+	/**
+	 * Finalize a browser-driven schedule run: retention, cloud push, runtime
+	 * status and notification. Only the job bound by start_inline() passes.
+	 *
+	 * @param string $schedule_id Schedule identifier.
+	 * @param string $job_id      Job identifier bound by start_inline().
+	 * @return array<string,string> Result with the recorded status.
+	 */
+	public static function finish_inline(string $schedule_id, string $job_id): array {
+		$schedule = Schedule::get($schedule_id);
+
+		if ($schedule === null) {
+			throw new \RuntimeException('Schedule not found.');
+		}
+
+		$binding  = self::INLINE_BINDING_PREFIX . $schedule['id'];
+		$expected = get_transient($binding);
+		$expected = is_string($expected) ? $expected : '';
+
+		if ($expected === '' || $expected !== $job_id) {
+			throw new \RuntimeException('This backup was not started by Run now, so it cannot be finalized as one.');
+		}
+
+		$state   = Runner::status($job_id);
+		$started = time();
+
+		if (empty($state['done'])) {
+			$status = self::fail_run($schedule, $started, 'The backup did not finish.');
+		} else {
+			$archive = isset($state['archiveName']) ? (string) $state['archiveName'] : '';
+
+			if ($archive === '') {
+				throw new \RuntimeException('The finished backup did not report its archive name.');
+			}
+
+			$status = self::complete_run($schedule, $started, $archive);
+		}
+
+		delete_transient($binding);
+
+		return array( 'status' => $status );
+	}
+
+	/**
+	 * Start an export job and drive it to completion.
+	 *
+	 * @param array $options Export options.
+	 * @return string Published archive name ('' when it did not finish).
+	 */
+	private static function drive_export(array $options): string {
+		$state    = Runner::start_export($options);
+		$job_id   = (string) $state['id'];
+		$guard    = 0;
+		$deadline = microtime(true) + 300;
+
+		do {
+			$state = Runner::advance($job_id);
+
+			if (++$guard > 100000 || microtime(true) > $deadline) {
+				break;
+			}
+		} while (empty($state['done']));
+
+		if (empty($state['done'])) {
+			return '';
+		}
+
+		return (string) $state['archiveName'];
+	}
+
+	/**
+	 * Whether a bound job exists and is still incomplete.
+	 *
+	 * @param string $job_id Job identifier.
+	 * @return bool
+	 */
+	private static function job_unfinished(string $job_id): bool {
+		try {
+			$state = Runner::status($job_id);
+		} catch (\Throwable $e) {
+			return false;
+		}
+
+		return empty($state['done']);
+	}
+
+	/**
+	 * Apply retention, cloud push, runtime status and notification after a
+	 * successful run.
+	 *
+	 * @param array<string,mixed> $schedule Schedule.
+	 * @param int                 $started  Run start timestamp.
+	 * @param string              $archive  Published archive name.
+	 * @return string Status text.
+	 */
+	private static function complete_run(array $schedule, int $started, string $archive): string {
+		$deleted = Retention::apply($schedule);
+		$status  = 'Success: ' . $archive;
+
+		if ($deleted > 0) {
+			$status .= sprintf(' (%d old backups removed)', $deleted);
+		}
+
+		$status .= self::push_to_cloud($schedule, $archive);
+
+		Schedule::update_runtime((string) $schedule['id'], $started, $status);
+		Notifier::send($schedule, true, $status);
+
+		return $status;
+	}
+
+	/**
+	 * Record and announce a failed run.
+	 *
+	 * @param array<string,mixed> $schedule Schedule.
+	 * @param int                 $started  Run start timestamp.
+	 * @param string              $message  Failure reason.
+	 * @return string Status text.
+	 */
+	private static function fail_run(array $schedule, int $started, string $message): string {
+		$status = 'Failed: ' . $message;
+
+		Schedule::update_runtime((string) $schedule['id'], $started, $status);
+		Notifier::send($schedule, false, $status);
+
+		if (defined('WP_CLI') && WP_CLI) {
+			\WP_CLI::warning($status);
+		}
+
+		return $status;
 	}
 
 	/**
@@ -245,13 +398,14 @@ final class Cron {
 		}
 
 		try {
-			$push  = Runner::start_push($backup_name, $cloud);
-			$guard = 0;
+			$push     = Runner::start_push($backup_name, $cloud);
+			$guard    = 0;
+			$deadline = microtime(true) + 300;
 
 			do {
 				$push = Runner::advance((string) $push['id']);
 
-				if (++$guard > 100000) {
+				if (++$guard > 100000 || microtime(true) > $deadline) {
 					break;
 				}
 			} while (empty($push['done']));

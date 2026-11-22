@@ -1,0 +1,39 @@
+# Ad-hoc smoke environment: MariaDB + the official WP-CLI WordPress image with
+# the repository mounted as the plugin. Driven from the host with:
+#
+#   docker compose -f tools/docker/smoke-compose.yml -p mk-smoke up -d db
+#   docker compose -f tools/docker/smoke-compose.yml -p mk-smoke run --rm cli \
+#       sh -c "wp core install ... && wp plugin activate migratekit && wp eval-file ..."
+#
+services:
+  db:
+    image: mariadb:10.11
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+    healthcheck:
+      test: [ 'CMD', 'healthcheck.sh', '--connect', '--innodb_initialized' ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  cli:
+    image: wordpress:cli
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+      WP_CLI_PHP_ARGS: '-d memory_limit=512M'
+    user: '0:0'
+    volumes:
+      - wp-state:/var/www/html
+      - ../..:/var/www/html/wp-content/plugins/migratekit
+
+volumes:
+  wp-state:

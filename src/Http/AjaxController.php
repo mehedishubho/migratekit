@@ -41,6 +41,8 @@ final class AjaxController {
 			'migratekit_schedule_save'  => 'schedule_save',
 			'migratekit_schedule_delete' => 'schedule_delete',
 			'migratekit_schedule_run'   => 'schedule_run',
+			'migratekit_schedule_start' => 'schedule_start',
+			'migratekit_schedule_finish' => 'schedule_finish',
 			'migratekit_reset_start'    => 'reset_start',
 			'migratekit_reset_step'     => 'reset_step',
 			'migratekit_cloud_status'   => 'cloud_status',
@@ -329,10 +331,18 @@ final class AjaxController {
 	public static function schedules_list(): void {
 		self::guard(Capabilities::EXPORT);
 
+		$schedules = array();
+
+		foreach (Schedule::all() as $schedule) {
+			$schedule['next_run'] = Cron::next_run((string) $schedule['id']);
+			$schedules[]          = $schedule;
+		}
+
 		wp_send_json_success(
 			array(
-				'schedules' => Schedule::all(),
-				'intervals' => Schedule::INTERVALS,
+				'schedules'   => $schedules,
+				'intervals'   => Schedule::INTERVALS,
+				'admin_email' => (string) get_option('admin_email'),
 			)
 		);
 	}
@@ -371,6 +381,51 @@ final class AjaxController {
 		wp_schedule_single_event(time(), Cron::HOOK, array( $id ));
 
 		wp_send_json_success(array( 'queued' => true ));
+	}
+
+	/**
+	 * Start a schedule's backup immediately and return its job state so the
+	 * browser can drive it stage-by-stage with live progress.
+	 *
+	 * @return void
+	 */
+	public static function schedule_start(): void {
+		self::guard(Capabilities::EXPORT);
+
+		$id = isset($_POST['id']) ? sanitize_text_field((string) wp_unslash($_POST['id'])) : '';
+
+		if ($id === '') {
+			wp_send_json_error(array( 'message' => 'Schedule not found.' ), 404);
+		}
+
+		try {
+			wp_send_json_success(Cron::start_inline($id));
+		} catch (\Throwable $e) {
+			wp_send_json_error(array( 'message' => $e->getMessage() ), 500);
+		}
+	}
+
+	/**
+	 * Finalize a browser-driven schedule run: retention, cloud push, runtime
+	 * status and notification.
+	 *
+	 * @return void
+	 */
+	public static function schedule_finish(): void {
+		self::guard(Capabilities::EXPORT);
+
+		$id     = isset($_POST['id']) ? sanitize_text_field((string) wp_unslash($_POST['id'])) : '';
+		$job_id = isset($_POST['job_id']) ? sanitize_text_field((string) wp_unslash($_POST['job_id'])) : '';
+
+		if ($id === '') {
+			wp_send_json_error(array( 'message' => 'Schedule not found.' ), 404);
+		}
+
+		try {
+			wp_send_json_success(Cron::finish_inline($id, $job_id));
+		} catch (\Throwable $e) {
+			wp_send_json_error(array( 'message' => $e->getMessage() ), 500);
+		}
 	}
 
 	public static function reset_start(): void {

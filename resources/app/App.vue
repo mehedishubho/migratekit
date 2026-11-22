@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import DashboardPage from './pages/DashboardPage.vue';
 import ExportPage from './pages/ExportPage.vue';
 import ImportPage from './pages/ImportPage.vue';
 import BackupsPage from './pages/BackupsPage.vue';
@@ -20,6 +21,7 @@ const page = computed(() => props.page);
 				<p>Migration, backup and restore. Every feature included.</p>
 			</div>
 			<nav class="mk-nav" aria-label="MigrateKit">
+				<a :class="{ active: page === 'home' }" href="?page=migratekit-home">Dashboard</a>
 				<a :class="{ active: page === 'export' }" href="?page=migratekit-export">Export</a>
 				<a :class="{ active: page === 'import' }" href="?page=migratekit-import">Import</a>
 				<a :class="{ active: page === 'backups' }" href="?page=migratekit-backups">Backups</a>
@@ -30,7 +32,8 @@ const page = computed(() => props.page);
 		</header>
 
 		<main class="mk-main">
-			<ExportPage v-if="page === 'export'" />
+			<DashboardPage v-if="page === 'home'" />
+			<ExportPage v-else-if="page === 'export'" />
 			<ImportPage v-else-if="page === 'import'" />
 			<BackupsPage v-else-if="page === 'backups'" />
 			<CloudPage v-else-if="page === 'cloud'" />

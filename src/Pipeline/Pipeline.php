@@ -38,6 +38,10 @@ final class Pipeline {
 				return false;
 			}
 
+			// Stage position feeds the overall percent math in the status callback.
+			$state['stage_total'] = $count;
+			$state['stage_index'] = $index;
+
 			$completed = $this->stages[ $index ]->run($state, $ctx);
 
 			if (! $completed) {

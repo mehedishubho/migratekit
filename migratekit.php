@@ -3,7 +3,7 @@
  * Plugin Name:       MigrateKit
  * Plugin URI:        https://getMigrateKit.com
  * Description:       One-click WordPress migration, backup and restore. Database, media, themes and plugins in a single archive. Every feature included, free, forever — no extensions required.
- * Version:           0.0.3
+ * Version:           0.0.11
  * Requires at least: 5.6
  * Requires PHP:      7.4
  * Author:            MEHEDI HASSAN SHUBHO
@@ -26,7 +26,7 @@ if (defined('MIGRATEKIT_VERSION')) {
 	return;
 }
 
-define('MIGRATEKIT_VERSION', '0.0.3');
+define('MIGRATEKIT_VERSION', '0.0.11');
 define('MIGRATEKIT_PLUGIN_FILE', __FILE__);
 define('MIGRATEKIT_PLUGIN_BASENAME', plugin_basename(__FILE__));
 define('MIGRATEKIT_PATH', plugin_dir_path(__FILE__));

@@ -12,7 +12,8 @@
 	--mk-accent-soft: #dbeafe;
 	--mk-danger: #b91c1c;
 	--mk-success: #15803d;
-	max-width: 980px;
+	--mk-warn: #b45309;
+	max-width: 1440px;
 	margin: 24px 0 48px;
 	color: var(--mk-text);
 	font-size: 14px;
@@ -29,6 +30,7 @@
 		--mk-accent-soft: #1e3a8a;
 		--mk-danger: #f87171;
 		--mk-success: #4ade80;
+		--mk-warn: #fbbf24;
 	}
 }
 
@@ -36,7 +38,8 @@
 	display: flex;
 	align-items: flex-end;
 	justify-content: space-between;
-	gap: 24px;
+	flex-wrap: wrap;
+	gap: 12px 24px;
 	padding-bottom: 18px;
 	border-bottom: 1px solid var(--mk-border);
 	margin-bottom: 24px;
@@ -56,6 +59,8 @@
 
 .mk-nav {
 	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
 	gap: 6px;
 }
 
@@ -83,6 +88,7 @@
 	border-radius: 14px;
 	padding: 24px;
 	box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+	overflow-x: auto;
 }
 
 .mk-card-head {
@@ -370,14 +376,54 @@
 }
 
 @media (max-width: 782px) {
+	.mk-wrap {
+		margin: 0 12px 0 0;
+	}
+
+	.mk-app {
+		margin: 16px 0 32px;
+	}
+
+	.mk-brand h1 {
+		font-size: 22px;
+	}
+
 	.mk-header {
 		flex-direction: column;
 		align-items: flex-start;
 	}
 
+	.mk-nav {
+		justify-content: flex-start;
+	}
+
+	.mk-card {
+		padding: 16px;
+		border-radius: 10px;
+	}
+
+	.mk-checks {
+		grid-template-columns: 1fr;
+	}
+
 	.mk-table th:nth-child(2),
 	.mk-table td:nth-child(2) {
 		display: none;
+	}
+}
+
+@media (max-width: 480px) {
+	.mk-tiles {
+		grid-template-columns: 1fr;
+	}
+
+	.mk-actions .mk-btn {
+		width: 100%;
+	}
+
+	.mk-progress-meta {
+		flex-direction: column;
+		gap: 2px;
 	}
 }
 
@@ -517,4 +563,93 @@
 	gap: 6px;
 	color: var(--mk-muted, #556);
 	font-size: 13px;
+}
+
+/* Small amber inline warnings (cron health, first-run nudges). */
+.mk-warn {
+	margin: 4px 0 0;
+	color: var(--mk-warn);
+	font-size: 12px;
+	line-height: 1.45;
+	font-weight: 600;
+}
+
+.mk-dash-foot {
+	margin: 22px 0 0;
+	padding-top: 14px;
+	border-top: 1px solid var(--mk-border);
+	color: var(--mk-muted);
+	font-size: 13px;
+}
+
+/* Dashboard stat tiles. */
+.mk-tiles {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+	gap: 14px;
+	margin-bottom: 20px;
+}
+
+.mk-tile {
+	border: 1px solid var(--mk-border);
+	border-radius: 12px;
+	padding: 16px 18px;
+	background: var(--mk-panel);
+}
+
+.mk-tile h3 {
+	margin: 0 0 8px;
+	font-size: 12px;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: var(--mk-muted);
+}
+
+.mk-tile .mk-big {
+	margin: 0;
+	font-size: 26px;
+	font-weight: 700;
+	line-height: 1.1;
+}
+
+.mk-tile .mk-sub {
+	margin: 8px 0 0;
+	color: var(--mk-muted);
+	font-size: 13px;
+	line-height: 1.45;
+}
+
+/* Dashboard quick-start cards. */
+.mk-action-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+	gap: 16px;
+}
+
+.mk-action-card {
+	border: 1px solid var(--mk-border);
+	border-radius: 12px;
+	padding: 18px;
+	background: var(--mk-bg);
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.mk-action-card h3 {
+	margin: 0;
+	font-size: 15px;
+}
+
+.mk-action-card p {
+	margin: 0;
+	color: var(--mk-muted);
+	line-height: 1.5;
+}
+
+.mk-action-card .mk-actions {
+	margin-top: auto;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
 }

@@ -94,7 +94,8 @@ final class ArchiveFilesStage implements StageInterface {
 			$state['cursors'][ $this->manifest_key ] = $cursor;
 
 			$ctx->report(
-				sprintf('Archiving %s (%d/%d)', $this->manifest_key, $cursor['index'], $total)
+				sprintf('Archiving %s (%d/%d)', $this->manifest_key, $cursor['index'], $total),
+				$total > 0 ? (int) floor($cursor['index'] * 100 / $total) : 100
 			);
 
 			if ($deadline !== null && microtime(true) >= $deadline && $cursor['index'] < $total) {

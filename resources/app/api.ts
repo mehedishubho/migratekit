@@ -91,7 +91,9 @@ export async function post<T = unknown>(action: string, payload: Payload = {}, f
 }
 
 /**
- * Drive a job to completion by polling the step endpoint.
+ * Drive a job to completion by polling the step endpoint. A failed step is
+ * retried with backoff — the job itself is resumable server-side, so a single
+ * transient request error should not kill a long export or import.
  */
 export async function runJob(
 	startRequest: Promise<JobState>,
@@ -101,8 +103,31 @@ export async function runJob(
 	let state = await startRequest;
 	onUpdate(state);
 
+	const attempts = 3;
+
 	while (!state.done) {
-		state = await post<JobState>(stepAction, { job_id: state.id });
+		let next: JobState | null = null;
+		let failure: unknown = null;
+
+		for (let attempt = 1; attempt <= attempts; attempt++) {
+			try {
+				next = await post<JobState>(stepAction, { job_id: state.id });
+				failure = null;
+				break;
+			} catch (caught) {
+				failure = caught;
+
+				if (attempt < attempts) {
+					await new Promise((resolve) => window.setTimeout(resolve, attempt * 800));
+				}
+			}
+		}
+
+		if (failure !== null || next === null) {
+			throw failure instanceof Error ? failure : new Error('The job could not continue.');
+		}
+
+		state = next;
 		onUpdate(state);
 
 		if (state.done) {
@@ -200,4 +225,62 @@ export function formatBytes(bytes: number): string {
 
 export function formatDate(timestamp: number): string {
 	return new Date(timestamp * 1000).toLocaleString();
+}
+
+/** Seconds for each built-in cadence (matches PHP: MONTH_IN_SECONDS = 30 days). */
+const INTERVAL_SECONDS: Record<string, number> = {
+	hourly: 3600,
+	twicedaily: 43200,
+	daily: 86400,
+	weekly: 604800,
+	monthly: 2592000,
+};
+
+export function intervalSeconds(interval: string): number {
+	return INTERVAL_SECONDS[interval] ?? 86400;
+}
+
+/** Human label for a cadence slug, e.g. "twicedaily" → "Twice a day". */
+export function friendlyInterval(interval: string): string {
+	switch (interval) {
+		case 'hourly':
+			return 'Every hour';
+		case 'twicedaily':
+			return 'Twice a day';
+		case 'daily':
+			return 'Daily';
+		case 'weekly':
+			return 'Weekly';
+		case 'monthly':
+			return 'Monthly';
+		default:
+			return interval;
+	}
+}
+
+/** Render a duration as short words, e.g. "3h 20m", "2d 5h", "45s". */
+export function inWords(seconds: number): string {
+	const safe = Math.max(0, Math.round(seconds));
+
+	if (safe < 60) {
+		return `${safe}s`;
+	}
+
+	const minutes = Math.floor(safe / 60);
+	const partMinutes = minutes % 60;
+	const hours = Math.floor(minutes / 60);
+
+	if (hours === 0) {
+		return `${minutes}m`;
+	}
+
+	const days = Math.floor(hours / 24);
+
+	if (days === 0) {
+		return partMinutes > 0 ? `${hours}h ${partMinutes}m` : `${hours}h`;
+	}
+
+	const partHours = hours % 24;
+
+	return partHours > 0 ? `${days}d ${partHours}h` : `${days}d`;
 }

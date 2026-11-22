@@ -14,6 +14,7 @@ use MigrateKit\Support\Capabilities;
 
 final class Menu {
 
+	public const SLUG_HOME      = 'migratekit-home';
 	public const SLUG_EXPORT    = 'migratekit-export';
 	public const SLUG_IMPORT    = 'migratekit-import';
 	public const SLUG_BACKUPS   = 'migratekit-backups';
@@ -44,14 +45,23 @@ final class Menu {
 			'MigrateKit',
 			'MigrateKit',
 			Capabilities::EXPORT,
-			self::SLUG_EXPORT,
-			array( 'MigrateKit\\Admin\\Menu', 'render_export' ),
+			self::SLUG_HOME,
+			array( 'MigrateKit\\Admin\\Menu', 'render_home' ),
 			'dashicons-migrate',
 			76.3
 		);
 
 		add_submenu_page(
-			self::SLUG_EXPORT,
+			self::SLUG_HOME,
+			'Dashboard',
+			'Dashboard',
+			Capabilities::EXPORT,
+			self::SLUG_HOME,
+			array( 'MigrateKit\\Admin\\Menu', 'render_home' )
+		);
+
+		add_submenu_page(
+			self::SLUG_HOME,
 			'Export',
 			'Export',
 			Capabilities::EXPORT,
@@ -60,7 +70,7 @@ final class Menu {
 		);
 
 		add_submenu_page(
-			self::SLUG_EXPORT,
+			self::SLUG_HOME,
 			'Import',
 			'Import',
 			Capabilities::IMPORT,
@@ -69,7 +79,7 @@ final class Menu {
 		);
 
 		add_submenu_page(
-			self::SLUG_EXPORT,
+			self::SLUG_HOME,
 			'Backups',
 			$label,
 			Capabilities::IMPORT,
@@ -78,7 +88,7 @@ final class Menu {
 		);
 
 		add_submenu_page(
-			self::SLUG_EXPORT,
+			self::SLUG_HOME,
 			'Cloud Storage',
 			'Cloud Storage',
 			Capabilities::EXPORT,
@@ -87,7 +97,7 @@ final class Menu {
 		);
 
 		add_submenu_page(
-			self::SLUG_EXPORT,
+			self::SLUG_HOME,
 			'Schedules',
 			'Schedules',
 			Capabilities::EXPORT,
@@ -96,7 +106,7 @@ final class Menu {
 		);
 
 		add_submenu_page(
-			self::SLUG_EXPORT,
+			self::SLUG_HOME,
 			'Reset',
 			'Reset',
 			Capabilities::RESET,
@@ -107,6 +117,10 @@ final class Menu {
 
 	public static function render_export(): void {
 		self::render('export');
+	}
+
+	public static function render_home(): void {
+		self::render('home');
 	}
 
 	public static function render_import(): void {

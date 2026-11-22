@@ -27,7 +27,7 @@ final class AssetLoader {
 
 		if (! in_array(
 			$page,
-			array( Menu::SLUG_EXPORT, Menu::SLUG_IMPORT, Menu::SLUG_BACKUPS, Menu::SLUG_SCHEDULES, Menu::SLUG_RESET, Menu::SLUG_CLOUD ),
+			array( Menu::SLUG_HOME, Menu::SLUG_EXPORT, Menu::SLUG_IMPORT, Menu::SLUG_BACKUPS, Menu::SLUG_SCHEDULES, Menu::SLUG_RESET, Menu::SLUG_CLOUD ),
 			true
 		)) {
 			return;
