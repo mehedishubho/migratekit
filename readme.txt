@@ -70,6 +70,7 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 * Live progress for exports, imports, restores and cloud transfers: the percentage climbs continuously instead of sitting at 0% until the end.
 * Reliable backup downloads: output buffering or compression enabled by other plugins can no longer corrupt or block the downloaded archive.
 * Exports and imports survive transient request failures — a stalled step retries instead of aborting the whole job.
+* Fixed the Dropbox tab showing no configuration options on fresh installs — the own-app key/secret form now appears immediately, with a link to the Dropbox app console.
 
 = 0.0.1 =
 * Initial public release.

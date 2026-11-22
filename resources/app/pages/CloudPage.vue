@@ -265,7 +265,7 @@ function payload(provider: ProviderStatus): Record<string, unknown> {
 	}
 
 	if (provider.id === 'dropbox') {
-		if (!dropboxAdvanced.value && !dropboxLegacyReady.value) {
+		if (easyDropbox.value && !dropboxAdvanced.value) {
 			// Easy mode: the folder is the only field on file.
 			body['folder'] = values.folder ?? '';
 
@@ -600,6 +600,9 @@ onMounted(() => {
 							<li>Allow access. Dropbox shows a short authorisation code.</li>
 							<li>Paste the code below — done. No app setup needed.</li>
 						</ol>
+						<button class="mk-link" type="button" :disabled="transfersBusy" @click="dropboxAdvanced = true">
+							Use my own Dropbox app instead
+						</button>
 					</template>
 
 					<template v-else-if="pasteConnect !== null">
@@ -626,7 +629,9 @@ onMounted(() => {
 						</div>
 					</template>
 
-					<template v-else-if="dropboxAdvanced">
+					<!-- No built-in app key available (or the user opted out):
+					     the own-app form is the only path, so always show it. -->
+					<template v-else-if="dropboxAdvanced || !easyDropbox">
 						<div v-for="spec in DROPBOX_FIELDS" :key="'d-' + spec.key" class="mk-field">
 							<span>
 								{{ spec.label }}
@@ -642,15 +647,10 @@ onMounted(() => {
 							/>
 						</div>
 						<p class="mk-note">
-							<strong>One-time setup:</strong> add this authorisation redirect URL to your Dropbox app:
+							<strong>One-time setup:</strong> create an app on the
+							<a href="https://www.dropbox.com/developers/apps" target="_blank" rel="noreferrer">Dropbox app console</a>,
+							then add this authorisation redirect URL to it:
 							<code>{{ config.adminPost }}?action=migratekit_cloud_dropbox_callback</code>
-						</p>
-					</template>
-
-					<template v-else>
-						<p class="mk-muted">
-							No connection yet. Connecting needs the built-in app key (once enabled) or your own Dropbox app
-							key — then everything runs inside your <code>Apps</code> folder.
 						</p>
 					</template>
 				</template>
@@ -768,7 +768,7 @@ onMounted(() => {
 						{{ connecting === current.id ? 'Opening Dropbox…' : 'Connect Dropbox' }}
 					</button>
 					<button
-						v-else-if="isDropbox && dropboxAdvanced && dropboxLegacyReady && !dropboxConnected"
+						v-else-if="isDropbox && (dropboxAdvanced || !easyDropbox) && dropboxLegacyReady && !dropboxConnected"
 						class="mk-btn"
 						type="button"
 						:disabled="transfersBusy"

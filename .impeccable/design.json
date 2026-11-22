@@ -1,0 +1,151 @@
+{
+	"schemaVersion": 2,
+	"generatedAt": "2026-11-23T00:00:00Z",
+	"title": "Design System: MigrateKit",
+	"extensions": {
+		"colorMeta": {
+			"surface": { "role": "neutral", "displayName": "Surface", "canonical": "#ffffff", "dark": "#0f172a", "tonalRamp": ["oklch(28% 0.03 255)", "oklch(38% 0.03 255)", "oklch(50% 0.02 255)", "oklch(62% 0.015 255)", "oklch(75% 0.01 255)", "oklch(85% 0.008 255)", "oklch(93% 0.005 255)", "oklch(100% 0 0)"] },
+			"panel": { "role": "neutral", "displayName": "Panel", "canonical": "#f8fafc", "dark": "#111c33", "tonalRamp": ["oklch(25% 0.035 250)", "oklch(35% 0.035 250)", "oklch(46% 0.03 250)", "oklch(58% 0.025 250)", "oklch(70% 0.018 250)", "oklch(82% 0.012 250)", "oklch(93% 0.006 250)", "oklch(98% 0.003 250)"] },
+			"ink": { "role": "neutral", "displayName": "Ink", "canonical": "#0f172a", "dark": "#e2e8f0", "tonalRamp": ["oklch(15% 0.03 262)", "oklch(22% 0.03 262)", "oklch(30% 0.03 262)", "oklch(40% 0.035 262)", "oklch(52% 0.03 262)", "oklch(66% 0.025 262)", "oklch(82% 0.015 262)", "oklch(93% 0.008 262)"] },
+			"engine-slate": { "role": "neutral", "displayName": "Engine Slate", "canonical": "#64748b", "dark": "#94a3b8", "tonalRamp": ["oklch(30% 0.035 255)", "oklch(38% 0.04 255)", "oklch(47% 0.045 255)", "oklch(55% 0.045 255)", "oklch(63% 0.04 255)", "oklch(72% 0.03 255)", "oklch(82% 0.02 255)", "oklch(91% 0.012 255)"] },
+			"hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#e2e8f0", "dark": "#1e293b", "tonalRamp": ["oklch(22% 0.03 260)", "oklch(30% 0.03 260)", "oklch(40% 0.035 260)", "oklch(52% 0.035 260)", "oklch(65% 0.028 260)", "oklch(78% 0.018 260)", "oklch(89% 0.01 260)", "oklch(95% 0.006 260)"] },
+			"signal-blue": { "role": "primary", "displayName": "Signal Blue", "canonical": "#2563eb", "dark": "#60a5fa", "tonalRamp": ["oklch(30% 0.14 262)", "oklch(38% 0.16 262)", "oklch(46% 0.18 262)", "oklch(55% 0.2 262)", "oklch(64% 0.18 262)", "oklch(74% 0.14 262)", "oklch(85% 0.08 262)", "oklch(94% 0.04 262)"] },
+			"signal-blue-soft": { "role": "primary", "displayName": "Signal Blue Soft", "canonical": "#dbeafe", "dark": "#1e3a8a", "tonalRamp": ["oklch(28% 0.09 262)", "oklch(36% 0.11 262)", "oklch(45% 0.12 262)", "oklch(55% 0.11 262)", "oklch(66% 0.09 262)", "oklch(78% 0.06 262)", "oklch(89% 0.035 262)", "oklch(96% 0.015 262)"] },
+			"alarm-red": { "role": "tertiary", "displayName": "Alarm Red", "canonical": "#b91c1c", "dark": "#f87171", "tonalRamp": ["oklch(30% 0.12 25)", "oklch(37% 0.14 25)", "oklch(45% 0.16 25)", "oklch(53% 0.18 25)", "oklch(62% 0.17 25)", "oklch(72% 0.13 25)", "oklch(83% 0.07 25)", "oklch(93% 0.03 25)"] },
+			"go-green": { "role": "tertiary", "displayName": "Go Green", "canonical": "#15803d", "dark": "#4ade80", "tonalRamp": ["oklch(28% 0.09 150)", "oklch(35% 0.11 150)", "oklch(43% 0.13 150)", "oklch(51% 0.14 150)", "oklch(60% 0.13 150)", "oklch(70% 0.11 150)", "oklch(82% 0.07 150)", "oklch(93% 0.03 150)"] },
+			"caution-amber": { "role": "tertiary", "displayName": "Caution Amber", "canonical": "#b45309", "dark": "#fbbf24", "tonalRamp": ["oklch(30% 0.09 60)", "oklch(37% 0.11 60)", "oklch(45% 0.12 60)", "oklch(53% 0.13 60)", "oklch(62% 0.13 60)", "oklch(73% 0.12 60)", "oklch(84% 0.09 60)", "oklch(94% 0.05 60)"] }
+		},
+		"typographyMeta": {
+			"display": { "displayName": "Display", "purpose": "The 'MigrateKit' brand title in the header only." },
+			"title": { "displayName": "Title", "purpose": "Card headings." },
+			"subtitle": { "displayName": "Subtitle", "purpose": "Card section and action-card headings." },
+			"body": { "displayName": "Body", "purpose": "Everything; single 14px base cascades through the app." },
+			"label": { "displayName": "Label (The Uppercase Ledger)", "purpose": "Metadata identification: tile headers, table columns, badges, status captions." },
+			"mono": { "displayName": "Mono", "purpose": "File names, archive names, keys, technical values (break-all)." }
+		},
+		"shadows": [
+			{ "name": "card-whisper", "value": "0 1px 2px rgba(15, 23, 42, 0.04)", "purpose": "The only shadow in the system; sits on cards and does no real lifting. Nothing else gets a shadow." }
+		],
+		"motion": [
+			{ "name": "progress-fill", "value": "width 0.25s ease", "purpose": "The system's only motion: the Signal Blue progress bar fill on long-running jobs." }
+		],
+		"breakpoints": [
+			{ "name": "wp-admin", "value": "782px" },
+			{ "name": "narrow", "value": "480px" }
+		]
+	},
+	"components": [
+		{
+			"name": "Primary Button",
+			"kind": "button",
+			"refersTo": "button-primary",
+			"description": "The one confident action on a view; Signal Blue fill, white text.",
+			"html": "<button class=\"ds-btn-primary\">Back up now</button>",
+			"css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; padding: 10px 18px; border: 0; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 700; font-size: 14px; cursor: pointer; } .ds-btn-primary:hover { background: #1d4ed8; } .ds-btn-primary:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }"
+		},
+		{
+			"name": "Ghost Button",
+			"kind": "button",
+			"refersTo": "button-ghost",
+			"description": "Secondary reach: transparent with hairline border and Signal Blue text.",
+			"html": "<button class=\"ds-btn-ghost\">Open Backups</button>",
+			"css": ".ds-btn-ghost { display: inline-flex; align-items: center; justify-content: center; padding: 10px 18px; border: 1px solid #e2e8f0; border-radius: 8px; background: transparent; color: #2563eb; font-weight: 700; font-size: 14px; cursor: pointer; } .ds-btn-ghost:hover { background: #f8fafc; } .ds-btn-ghost:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }"
+		},
+		{
+			"name": "Danger Button",
+			"kind": "button",
+			"refersTo": "button-danger",
+			"description": "Destructive actions only; Alarm Red fill.",
+			"html": "<button class=\"ds-btn-danger\">Delete selected</button>",
+			"css": ".ds-btn-danger { display: inline-flex; align-items: center; justify-content: center; padding: 10px 18px; border: 0; border-radius: 8px; background: #b91c1c; color: #ffffff; font-weight: 700; font-size: 14px; cursor: pointer; } .ds-btn-danger:hover { background: #991b1b; } .ds-btn-danger:focus-visible { outline: 2px solid #b91c1c; outline-offset: 2px; }"
+		},
+		{
+			"name": "Input",
+			"kind": "input",
+			"refersTo": "input",
+			"description": "Text field or select: hairline border, Surface fill, Signal Blue seating focus.",
+			"html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Archive password</span><input class=\"ds-input\" type=\"text\" placeholder=\"Optional\" /></label>",
+			"css": ".ds-field { display: flex; flex-direction: column; gap: 6px; font-weight: 600; font-size: 14px; color: #0f172a; } .ds-field-label { font-size: 14px; } .ds-input { width: 100%; padding: 9px 11px; border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff; color: #0f172a; font-size: 14px; font-weight: 400; } .ds-input:focus { outline: 2px solid #2563eb; outline-offset: 1px; border-color: transparent; }"
+		},
+		{
+			"name": "Nav Pill",
+			"kind": "nav",
+			"refersTo": "nav-pill",
+			"description": "Header navigation pill; active state swaps to Signal Blue Soft fill.",
+			"html": "<nav class=\"ds-nav\"><a class=\"ds-nav-pill ds-active\" href=\"#\">Dashboard</a><a class=\"ds-nav-pill\" href=\"#\">Export</a><a class=\"ds-nav-pill\" href=\"#\">Backups</a></nav>",
+			"css": ".ds-nav { display: flex; flex-wrap: wrap; gap: 6px; } .ds-nav-pill { padding: 8px 14px; border-radius: 8px; color: #64748b; text-decoration: none; font-weight: 600; font-size: 14px; } .ds-nav-pill:hover { background: #f8fafc; color: #0f172a; } .ds-nav-pill.ds-active { background: #dbeafe; color: #2563eb; } .ds-nav-pill:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }"
+		},
+		{
+			"name": "Tab",
+			"kind": "chip",
+			"refersTo": "tab",
+			"description": "Outlined in-page tab (e.g. cloud provider switching), with status dot.",
+			"html": "<div class=\"ds-tabs\"><button class=\"ds-tab ds-active\"><span class=\"ds-dot ds-dot-ok\"></span>S3</button><button class=\"ds-tab\"><span class=\"ds-dot\"></span>Dropbox</button></div>",
+			"css": ".ds-tabs { display: flex; gap: 8px; flex-wrap: wrap; } .ds-tab { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 1px solid #e2e8f0; border-radius: 8px; background: #f8fafc; color: #0f172a; cursor: pointer; font-size: 13px; } .ds-tab.ds-active { border-color: #2563eb; background: #dbeafe; color: #2563eb; font-weight: 600; } .ds-dot { width: 8px; height: 8px; border-radius: 50%; background: #e2e8f0; } .ds-dot-ok { background: #15803d; }"
+		},
+		{
+			"name": "Card",
+			"kind": "card",
+			"refersTo": "card",
+			"description": "The bench surface every page stacks; hairline border, whisper shadow, 14px radius.",
+			"html": "<section class=\"ds-card\"><div class=\"ds-card-head\"><div><h2 class=\"ds-card-title\">Welcome to MigrateKit</h2><p class=\"ds-card-sub\">Everything your site needs in one place.</p></div><span class=\"ds-badge\">The basics in 3 clicks</span></div><p class=\"ds-card-body\">Card content sits here.</p></section>",
+			"css": ".ds-card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 24px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); max-width: 640px; font-size: 14px; color: #0f172a; } .ds-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; } .ds-card-title { margin: 0 0 4px; font-size: 18px; font-weight: 600; } .ds-card-sub { margin: 0; color: #64748b; } .ds-badge { align-self: flex-start; padding: 4px 10px; border-radius: 999px; background: #dbeafe; color: #2563eb; font-size: 12px; font-weight: 700; white-space: nowrap; }"
+		},
+		{
+			"name": "Stat Tile",
+			"kind": "card",
+			"refersTo": "stat-tile",
+			"description": "Dashboard metric tile: Panel fill, uppercase ledger header, big figure.",
+			"html": "<div class=\"ds-tile\"><h3 class=\"ds-tile-label\">Backups on this server</h3><p class=\"ds-tile-big\">12</p><p class=\"ds-tile-sub\">2.4 GB stored · newest Nov 22, 2026</p></div>",
+			"css": ".ds-tile { border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px 18px; background: #f8fafc; max-width: 260px; } .ds-tile-label { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; font-weight: 700; } .ds-tile-big { margin: 0; font-size: 26px; font-weight: 700; line-height: 1.1; color: #0f172a; } .ds-tile-sub { margin: 8px 0 0; color: #64748b; font-size: 13px; line-height: 1.45; }"
+		},
+		{
+			"name": "Dropzone",
+			"kind": "custom",
+			"refersTo": "input",
+			"description": "Archive upload target: the one intentionally open shape on the bench.",
+			"html": "<label class=\"ds-drop\"><input type=\"file\" hidden /><strong>Drop the .wpress archive here</strong><span>or click to choose a file</span></label>",
+			"css": ".ds-drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 34px 20px; border: 2px dashed #e2e8f0; border-radius: 12px; background: #f8fafc; cursor: pointer; text-align: center; color: #64748b; font-size: 14px; max-width: 480px; } .ds-drop strong { color: #0f172a; font-size: 15px; } .ds-drop:hover { border-color: #2563eb; background: #dbeafe; }"
+		},
+		{
+			"name": "Progress Bar",
+			"kind": "custom",
+			"refersTo": "progress-track",
+			"description": "Live job progress: pill track, Signal Blue fill, the system's only motion.",
+			"html": "<div class=\"ds-progress\" role=\"status\" aria-live=\"polite\"><div class=\"ds-bar\"><span style=\"width:42%\"></span></div><div class=\"ds-progress-meta\"><span>Archiving media…</span><span>42%</span></div></div>",
+			"css": ".ds-progress { margin-top: 20px; max-width: 480px; } .ds-bar { height: 10px; border-radius: 999px; background: #f8fafc; overflow: hidden; border: 1px solid #e2e8f0; } .ds-bar span { display: block; height: 100%; background: #2563eb; transition: width 0.25s ease; } .ds-progress-meta { display: flex; justify-content: space-between; margin-top: 8px; color: #64748b; font-size: 13px; }"
+		}
+	],
+	"narrative": {
+		"northStar": "The Workshop Bench",
+		"overview": "MigrateKit's admin is an organized technician's bench: every tool visible, in reach, and honestly labeled. Competence you can see. The atmosphere is calm and sturdy — no-nonsense surfaces that sit still until used, with lightness earned from whitespace and precision rather than decoration. Nothing animates unless work is actually happening, and when it does (a job's progress bar), it is the single honest signal on the bench.\n\nThe system lives inside the WordPress admin but deliberately reads as its own room: a token-driven slate-and-blue world (--mk-* custom properties) with a full automatic dark scheme (prefers-color-scheme), card-based pages, and one accent doing all the talking. Density is comfortable-admin, not dashboard-crisp: 14px body, generous card padding, hairline borders instead of shadows.\n\nIt serves two confirmed audiences at once — DIY site owners following guided flows and professionals reaching for precise controls — so clarity of state (what is running, what is safe, what is connected) outrank visual expression everywhere.",
+		"keyCharacteristics": [
+			"Flat, hairline-bordered surfaces; one whisper of a shadow on cards and nothing else",
+			"Signal Blue as the only expressive color: primary action, active state, links",
+			"Semantic state colors (red / green / amber) appear only for real danger / success / warning",
+			"System font stack inherited from WordPress admin; hierarchy by size and weight, not family",
+			"Automatic dark scheme via token swap — no separate dark layout",
+			"Comfortable density: 14px base, 24px card padding, auto-fit grids that collapse gracefully"
+		],
+		"rules": [
+			{ "name": "The One Signal Rule", "body": "Signal Blue marks primary actions, active state, and links — nothing else. If everything is blue, nothing is.", "section": "colors" },
+			{ "name": "State Earns Its Color", "body": "Red, green, and amber appear only for genuine danger, success, and warning states. They are never used decoratively or as a second brand accent.", "section": "colors" },
+			{ "name": "The Uppercase Ledger Rule", "body": "Uppercase 12px labels are for identifying metadata (tile headers, table columns, badges) — never for buttons, nav, or sentences.", "section": "typography" },
+			{ "name": "The Flat Bench Rule", "body": "Surfaces sit flat at rest. Depth is tonal (Panel vs Surface) and bordered (Hairline); never add shadows to communicate hierarchy.", "section": "elevation" }
+		],
+		"dos": [
+			"Do reach for the token ladder first: any new surface uses --mk-* custom properties so the dark scheme comes free.",
+			"Do give every view exactly one Signal Blue primary action; secondaries go ghost.",
+			"Do use the auto-fit minmax() grid patterns (mk-grid, mk-tiles, mk-checks, mk-action-grid) for any new grouped layout.",
+			"Do keep long technical values (archive names, keys, paths) in mono with break-all.",
+			"Do attach live progress (mk-bar + aria-live=\"polite\" meta) to any long-running job, and a state color only when state is real."
+		],
+		"donts": [
+			"Don't add shadows for hierarchy — the bench is flat; borders and the Panel tone carry structure.",
+			"Don't introduce a second brand accent or use Signal Blue decoratively.",
+			"Don't uppercase anything that isn't metadata (the Ledger Rule) or set a custom font family.",
+			"Don't hardcode light-scheme colors — they break the automatic dark scheme.",
+			"Don't float modals over the page; dialogs expand inline as bordered panels."
+		]
+	}
+}

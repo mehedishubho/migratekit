@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "resources/app/styles.css"
+        ],
+        "createdAt": "2026-11-22T21:12:51.607Z",
+        "reason": "maintainer design decision: .mk-note callout intentionally mirrors WordPress core admin-notice styling (colored left border on tinted panel), the domain-standard pattern inside wp-admin; flagged line predates this session"
+      }
+    ]
+  }
+}
