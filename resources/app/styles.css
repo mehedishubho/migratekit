@@ -10,6 +10,7 @@
 	--mk-border: #e2e8f0;
 	--mk-accent: #2563eb;
 	--mk-accent-soft: #dbeafe;
+	--mk-accent-text: #1d4ed8;
 	--mk-danger: #b91c1c;
 	--mk-success: #15803d;
 	--mk-warn: #b45309;
@@ -28,6 +29,7 @@
 		--mk-border: #1e293b;
 		--mk-accent: #60a5fa;
 		--mk-accent-soft: #1e3a8a;
+		--mk-accent-text: #93c5fd;
 		--mk-danger: #f87171;
 		--mk-success: #4ade80;
 		--mk-warn: #fbbf24;
@@ -79,7 +81,7 @@
 
 .mk-nav a.active {
 	background: var(--mk-accent-soft);
-	color: var(--mk-accent);
+	color: var(--mk-accent-text);
 }
 
 .mk-card {
@@ -114,7 +116,7 @@
 	padding: 4px 10px;
 	border-radius: 999px;
 	background: var(--mk-accent-soft);
-	color: var(--mk-accent);
+	color: var(--mk-accent-text);
 	font-size: 12px;
 	font-weight: 700;
 	white-space: nowrap;
@@ -236,6 +238,16 @@
 	cursor: not-allowed;
 }
 
+/* One keyboard-focus voice for every interactive control. */
+.mk-btn:focus-visible,
+.mk-link:focus-visible,
+.mk-nav a:focus-visible,
+.mk-tab:focus-visible,
+a.mk-tile:focus-visible {
+	outline: 2px solid var(--mk-accent);
+	outline-offset: 2px;
+}
+
 .mk-btn-ghost {
 	background: transparent;
 	color: var(--mk-accent);
@@ -281,6 +293,23 @@
 	margin-top: 8px;
 	color: var(--mk-muted);
 	font-size: 13px;
+}
+
+/* Percent figure and its inline Stop control share the right-hand slot. */
+.mk-progress-side {
+	display: inline-flex;
+	align-items: center;
+	gap: 12px;
+}
+
+/* Failed-load state inside stat tiles: the state earns its color. */
+.mk-inline-error {
+	color: var(--mk-danger);
+	font-weight: 600;
+}
+
+.mk-inline-error .mk-link {
+	padding: 0 0 0 6px;
 }
 
 .mk-note {
@@ -364,11 +393,25 @@
 .mk-link {
 	background: none;
 	border: 0;
-	padding: 4px 8px;
+	padding: 6px 8px;
 	color: var(--mk-accent);
 	font-weight: 600;
 	cursor: pointer;
 	text-decoration: none;
+}
+
+/* Visually hidden, announced to screen readers (progress milestones). */
+.mk-sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	border: 0;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	overflow: hidden;
+	white-space: nowrap;
 }
 
 .mk-link-danger {
@@ -539,8 +582,8 @@
 }
 
 .mk-seg-btn.active {
-	background: var(--mk-accent-soft, #eef2ff);
-	color: var(--mk-accent, #3f51b5);
+	background: var(--mk-accent-soft);
+	color: var(--mk-accent-text);
 	font-weight: 600;
 }
 
@@ -561,7 +604,7 @@
 	padding-left: 22px;
 	display: grid;
 	gap: 6px;
-	color: var(--mk-muted, #556);
+	color: var(--mk-muted);
 	font-size: 13px;
 }
 
@@ -617,6 +660,21 @@
 	color: var(--mk-muted);
 	font-size: 13px;
 	line-height: 1.45;
+}
+
+/* The safety headline tile: recency leads the page and opens the detail view. */
+a.mk-tile {
+	color: inherit;
+	text-decoration: none;
+}
+
+a.mk-tile:hover,
+a.mk-tile:focus-visible {
+	border-color: var(--mk-accent);
+}
+
+.mk-tile-lead .mk-big {
+	font-size: 32px;
 }
 
 /* Dashboard quick-start cards. */

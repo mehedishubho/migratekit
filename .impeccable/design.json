@@ -11,12 +11,15 @@
 			"hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#e2e8f0", "dark": "#1e293b", "tonalRamp": ["oklch(22% 0.03 260)", "oklch(30% 0.03 260)", "oklch(40% 0.035 260)", "oklch(52% 0.035 260)", "oklch(65% 0.028 260)", "oklch(78% 0.018 260)", "oklch(89% 0.01 260)", "oklch(95% 0.006 260)"] },
 			"signal-blue": { "role": "primary", "displayName": "Signal Blue", "canonical": "#2563eb", "dark": "#60a5fa", "tonalRamp": ["oklch(30% 0.14 262)", "oklch(38% 0.16 262)", "oklch(46% 0.18 262)", "oklch(55% 0.2 262)", "oklch(64% 0.18 262)", "oklch(74% 0.14 262)", "oklch(85% 0.08 262)", "oklch(94% 0.04 262)"] },
 			"signal-blue-soft": { "role": "primary", "displayName": "Signal Blue Soft", "canonical": "#dbeafe", "dark": "#1e3a8a", "tonalRamp": ["oklch(28% 0.09 262)", "oklch(36% 0.11 262)", "oklch(45% 0.12 262)", "oklch(55% 0.11 262)", "oklch(66% 0.09 262)", "oklch(78% 0.06 262)", "oklch(89% 0.035 262)", "oklch(96% 0.015 262)"] },
+			"signal-blue-strong": { "role": "primary", "displayName": "Signal Blue Strong", "canonical": "#1d4ed8", "dark": "#93c5fd", "tonalRamp": ["oklch(28% 0.13 262)", "oklch(35% 0.15 262)", "oklch(43% 0.17 262)", "oklch(50% 0.17 262)", "oklch(58% 0.15 262)", "oklch(68% 0.12 262)", "oklch(80% 0.07 262)", "oklch(91% 0.035 262)"] },
 			"alarm-red": { "role": "tertiary", "displayName": "Alarm Red", "canonical": "#b91c1c", "dark": "#f87171", "tonalRamp": ["oklch(30% 0.12 25)", "oklch(37% 0.14 25)", "oklch(45% 0.16 25)", "oklch(53% 0.18 25)", "oklch(62% 0.17 25)", "oklch(72% 0.13 25)", "oklch(83% 0.07 25)", "oklch(93% 0.03 25)"] },
 			"go-green": { "role": "tertiary", "displayName": "Go Green", "canonical": "#15803d", "dark": "#4ade80", "tonalRamp": ["oklch(28% 0.09 150)", "oklch(35% 0.11 150)", "oklch(43% 0.13 150)", "oklch(51% 0.14 150)", "oklch(60% 0.13 150)", "oklch(70% 0.11 150)", "oklch(82% 0.07 150)", "oklch(93% 0.03 150)"] },
 			"caution-amber": { "role": "tertiary", "displayName": "Caution Amber", "canonical": "#b45309", "dark": "#fbbf24", "tonalRamp": ["oklch(30% 0.09 60)", "oklch(37% 0.11 60)", "oklch(45% 0.12 60)", "oklch(53% 0.13 60)", "oklch(62% 0.13 60)", "oklch(73% 0.12 60)", "oklch(84% 0.09 60)", "oklch(94% 0.05 60)"] }
 		},
 		"typographyMeta": {
 			"display": { "displayName": "Display", "purpose": "The 'MigrateKit' brand title in the header only." },
+			"display-mobile": { "displayName": "Display (mobile)", "purpose": "The brand title below 782px." },
+			"stat-lead": { "displayName": "Stat Lead", "purpose": "The lead stat tile's figure (last-backup age) — one step above the standard tile figure so the safety headline dominates." },
 			"title": { "displayName": "Title", "purpose": "Card headings." },
 			"subtitle": { "displayName": "Subtitle", "purpose": "Card section and action-card headings." },
 			"body": { "displayName": "Body", "purpose": "Everything; single 14px base cascades through the app." },

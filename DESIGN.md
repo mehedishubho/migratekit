@@ -9,6 +9,7 @@ colors:
   hairline: "#e2e8f0"
   signal-blue: "#2563eb"
   signal-blue-soft: "#dbeafe"
+  signal-blue-strong: "#1d4ed8"
   alarm-red: "#b91c1c"
   go-green: "#15803d"
   caution-amber: "#b45309"
@@ -19,6 +20,17 @@ typography:
     fontWeight: 700
     lineHeight: 1.2
     letterSpacing: "-0.02em"
+  display-mobile:
+    fontFamily: "inherit (WordPress admin system stack)"
+    fontSize: "22px"
+    fontWeight: 700
+    lineHeight: 1.2
+    letterSpacing: "-0.02em"
+  stat-lead:
+    fontFamily: "inherit (WordPress admin system stack)"
+    fontSize: "32px"
+    fontWeight: 700
+    lineHeight: 1.1
   title:
     fontFamily: "inherit (WordPress admin system stack)"
     fontSize: "18px"
@@ -87,7 +99,7 @@ components:
     padding: "16px 18px"
   badge:
     backgroundColor: "{colors.signal-blue-soft}"
-    textColor: "{colors.signal-blue}"
+    textColor: "{colors.signal-blue-strong}"
     rounded: "{rounded.pill}"
     padding: "4px 10px"
     typography: "{typography.label}"
@@ -96,7 +108,7 @@ components:
     padding: "8px 14px"
   nav-pill-active:
     backgroundColor: "{colors.signal-blue-soft}"
-    textColor: "{colors.signal-blue}"
+    textColor: "{colors.signal-blue-strong}"
   tab:
     backgroundColor: "{colors.panel}"
     textColor: "{colors.ink}"
@@ -104,7 +116,7 @@ components:
     padding: "8px 14px"
   tab-active:
     backgroundColor: "{colors.signal-blue-soft}"
-    textColor: "{colors.signal-blue}"
+    textColor: "{colors.ink}"
   progress-track:
     backgroundColor: "{colors.panel}"
     rounded: "{rounded.pill}"
@@ -141,7 +153,8 @@ All values are CSS custom properties on `.mk-app` (`resources/app/styles.css`); 
 ### Primary
 
 - **Signal Blue** (#2563eb): the system's one voice. Primary buttons, active nav pills and tabs, links, focus rings, progress fill, dropzone-active border. Its rarity is the point.
-- **Signal Blue Soft** (#dbeafe): the tint that marks active states — badge background, active nav/tab fill. Always paired with Signal Blue text.
+- **Signal Blue Soft** (#dbeafe): the tint that marks active states — badge background, active nav/tab fill. Always paired with Signal Blue Strong text (5.5:1).
+- **Signal Blue Strong** (#1d4ed8): accent text sitting on Signal Blue Soft — nav pills, badges, segmented-control active text — where Signal Blue itself measures below the 4.5:1 AA floor at those sizes.
 
 ### Neutral
 
@@ -159,7 +172,7 @@ All values are CSS custom properties on `.mk-app` (`resources/app/styles.css`); 
 
 ### Dark Scheme
 
-`prefers-color-scheme: dark` swaps the tokens: Surface #0f172a, Panel #111c33, Ink #e2e8f0, Engine Slate #94a3b8, Hairline #1e293b, Signal Blue #60a5fa, Signal Blue Soft #1e3a8a, Alarm Red #f87171, Go Green #4ade80, Caution Amber #fbbf24. Roles and rules are identical; only values move.
+`prefers-color-scheme: dark` swaps the tokens: Surface #0f172a, Panel #111c33, Ink #e2e8f0, Engine Slate #94a3b8, Hairline #1e293b, Signal Blue #60a5fa, Signal Blue Soft #1e3a8a, Signal Blue Strong #93c5fd, Alarm Red #f87171, Go Green #4ade80, Caution Amber #fbbf24. Roles and rules are identical; only values move.
 
 ### Named Rules
 
@@ -178,6 +191,7 @@ All values are CSS custom properties on `.mk-app` (`resources/app/styles.css`); 
 ### Hierarchy
 
 - **Display** (700, 26px, line-height 1.2, tracking −0.02em): the page brand title "MigrateKit" in the header only. Drops to 22px below 782px.
+- **Stat Lead** (700, 32px, line-height 1.1): the lead stat tile's figure — the last-backup age on the dashboard — one step above the standard tile figure so the safety headline dominates.
 - **Title** (600, 18px): card headings (`mk-card h2`).
 - **Subtitle** (600, 15px): card section headings, action-card titles (`h3`).
 - **Body** (400, 14px): everything. The app sets one base font-size (14px) and lets it cascade.
@@ -221,7 +235,7 @@ Component feel in one phrase: **tactile and confident** — solid, grippable, ob
 
 ### Navigation
 
-Header nav pills: 8px radius, 8px 14px padding, Engine Slate text at rest (weight 600); hover fills Panel and darkens text to Ink; active fills Signal Blue Soft with Signal Blue text. Full page reloads via `?page=` links — no SPA routing.
+Header nav pills: 8px radius, 8px 14px padding, Engine Slate text at rest (weight 600); hover fills Panel and darkens text to Ink; active fills Signal Blue Soft with Signal Blue Strong text. Full page reloads via `?page=` links — no SPA routing.
 
 ### Tabs
 

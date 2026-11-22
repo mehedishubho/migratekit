@@ -99,13 +99,33 @@ export async function runJob(
 	startRequest: Promise<JobState>,
 	stepAction: string,
 	onUpdate: (state: JobState) => void,
+	shouldStop?: () => boolean,
 ): Promise<JobState> {
-	let state = await startRequest;
+	return driveJob(await startRequest, stepAction, onUpdate, shouldStop);
+}
+
+/**
+ * Drive an already-created job to completion by polling the step endpoint.
+ * A failed step is retried with backoff — the job itself is resumable
+ * server-side, so a single transient request error should not kill a long
+ * export or import. `shouldStop` is polled between requests so a cancel
+ * from the page takes effect without waiting out the retry backoff.
+ */
+export async function driveJob(
+	state: JobState,
+	stepAction: string,
+	onUpdate: (state: JobState) => void,
+	shouldStop?: () => boolean,
+): Promise<JobState> {
 	onUpdate(state);
 
 	const attempts = 3;
 
 	while (!state.done) {
+		if (shouldStop?.()) {
+			return state;
+		}
+
 		let next: JobState | null = null;
 		let failure: unknown = null;
 
@@ -116,6 +136,10 @@ export async function runJob(
 				break;
 			} catch (caught) {
 				failure = caught;
+
+				if (shouldStop?.()) {
+					return state;
+				}
 
 				if (attempt < attempts) {
 					await new Promise((resolve) => window.setTimeout(resolve, attempt * 800));

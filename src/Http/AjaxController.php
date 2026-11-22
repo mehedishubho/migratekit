@@ -32,6 +32,7 @@ final class AjaxController {
 			'migratekit_import_step'   => 'import_step',
 			'migratekit_import_chunk'  => 'import_chunk',
 			'migratekit_status'        => 'status',
+			'migratekit_job_cancel'    => 'job_cancel',
 			'migratekit_backups_list'  => 'backups_list',
 			'migratekit_backup_delete' => 'backup_delete',
 			'migratekit_backup_restore' => 'backup_restore',
@@ -178,6 +179,25 @@ final class AjaxController {
 			wp_send_json_success(Runner::status($job_id));
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 404);
+		}
+	}
+
+	/**
+	 * Cancel a running job from the browser. Idempotent: cancelling an
+	 * unknown or already-finished job succeeds without side effects.
+	 */
+	public static function job_cancel(): void {
+		$job_id = isset($_POST['job_id']) ? sanitize_text_field((string) wp_unslash($_POST['job_id'])) : '';
+
+		if (! self::authorize()) {
+			wp_send_json_error(array( 'message' => 'You do not have permission to do that.' ), 403);
+		}
+
+		try {
+			Runner::cancel($job_id);
+			wp_send_json_success(array( 'cancelled' => true ));
+		} catch (\Throwable $e) {
+			wp_send_json_error(array( 'message' => $e->getMessage() ), 500);
 		}
 	}
 
