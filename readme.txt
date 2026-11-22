@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.11
+Stable tag: 0.0.12
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -65,6 +65,14 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 
 == Changelog ==
 
+= 0.0.12 =
+* Safety-first dashboard: the age of your last backup is the headline number, and "Back up now" is the single primary action.
+* Running backups can be stopped mid-run, resume automatically after a page refresh, and offer one-click retry when they fail — with a guard against closing the tab mid-backup.
+* Stat tiles refresh after every run (no more "0 backups" next to a success message) and failed loads get a red state with a Try again link.
+* Clearer dashboard copy: the migration button names its destination ("Export this site"), and the Reset link states its consequence before you click it.
+* Accessibility: keyboard focus indicators on every control, screen-reader progress announcements at stage milestones instead of every tick, and active-state colors that meet WCAG AA contrast in both light and dark schemes.
+* New `migratekit_job_cancel` AJAX endpoint backs the Stop control (REST already supported cancellation).
+
 = 0.0.11 =
 * Responsive admin layout — the app now fills wide screens and adapts to tablets and phones instead of hugging a fixed width.
 * Live progress for exports, imports, restores and cloud transfers: the percentage climbs continuously instead of sitting at 0% until the end.
@@ -87,6 +95,9 @@ Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus
 * Explanatory admin notice when the compiled front-end is missing (for example after installing from a source archive instead of the release ZIP).
 
 == Upgrade Notice ==
+
+= 0.0.12 =
+Stop/resume for running backups, one-click retry after failures, and a safety-first dashboard. Update recommended.
 
 = 0.0.11 =
 Responsive layout for all screens, live progress percentages and reliable backup downloads. Update recommended.
