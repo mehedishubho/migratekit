@@ -132,8 +132,9 @@ async function backUpNow(): Promise<void> {
 	let jobId = '';
 
 	try {
+		// Uncompressed, like the Export page's default: gzip spends minutes of CPU on a large site's already-compressed media.
 		await runJob(
-			post<JobState>('migratekit_export_start', { compression: 'gzip' }),
+			post<JobState>('migratekit_export_start'),
 			'migratekit_export_step',
 			(state) => {
 				trackJob(state);

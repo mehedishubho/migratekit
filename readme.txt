@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.12
+Stable tag: 0.0.13
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -64,6 +64,17 @@ PHP 7.4 or newer (8.2+ recommended) with the standard `openssl`, `zlib` and `bzi
 Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus `cloud list|test|files|push|pull`, including the full export option set as command flags.
 
 == Changelog ==
+
+= 0.0.13 =
+* Large sites no longer stall: file listing, the database dump, packing and the final checksum all run in small resumable slices instead of one long request.
+* A backup interrupted by a server limit or a closed tab can be resumed where it stopped — the archive is repaired to its last safe point, never corrupted.
+* Database dumps page by primary key, so tables with millions of rows stay fast and memory stays flat.
+* A database error now fails the backup with a clear message instead of silently leaving a table out of the dump.
+* Pre-flight disk space check with a clear message when the server cannot hold the backup.
+* Folders of other backup plugins (All-in-One WP Migration, UpdraftPlus, Duplicator, BackWPup, …) are excluded from backups instead of being swept in.
+* Scheduled backups run across many short cron requests, so hosts with short time limits can complete them.
+* Transient failures retry automatically with growing pauses, and the backup log no longer grows with every file.
+* Fixed the site-info REST endpoint failing on every install.
 
 = 0.0.12 =
 * Safety-first dashboard: the age of your last backup is the headline number, and "Back up now" is the single primary action.
