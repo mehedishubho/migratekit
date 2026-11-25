@@ -21,6 +21,7 @@ use MigrateKit\Cloud\PushPipeline;
 use MigrateKit\Cloud\S3Provider;
 use MigrateKit\Cloud\SigV4;
 use MigrateKit\Cloud\Transport;
+use MigrateKit\Pipeline\Pipeline;
 use MigrateKit\Pipeline\PipelineContext;
 use MigrateKit\Site\SiteContext;
 
@@ -50,7 +51,10 @@ function wp_create_nonce(string $action = ''): string {
 	return substr(hash('sha256', $action . '|nonce'), 0, 10);
 }
 
-function wp_verify_nonce(string $nonce, string $action = ''): int|false {
+/**
+ * @return int|false
+ */
+function wp_verify_nonce(string $nonce, string $action = '') {
 	return $nonce !== '' && $nonce === substr(hash('sha256', $action . '|nonce'), 0, 10) ? 1 : false;
 }
 
@@ -335,6 +339,14 @@ $s3fake = function (string $method, string $url, array $headers, $body, int $tim
 		}
 	}
 
+	if ($method === 'GET' && $query === array()) {
+		return array(
+			'status'  => 200,
+			'headers' => array(),
+			'body'    => '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>',
+		);
+	}
+
 	if (isset($query['list-type'])) {
 		if (! isset($query['continuation-token'])) {
 			return array(
@@ -461,6 +473,257 @@ try {
 
 check_cl('failing bucket listing throws', $threw);
 check_cl('etag preserved in complete call', strpos(call_complete($s3calls), '"part-etag-1"') !== false);
+
+// A connection test must prove write access: a read-only key lists the bucket
+// fine and is refused only when the push starts.
+$before_calls = count($s3calls);
+$provider->test();
+$test_calls  = array_slice($s3calls, $before_calls);
+$probe_calls = array_values(array_filter($test_calls, static function (array $call): bool {
+	return strpos($call['url'], 'migratekit-write-check.wpress') !== false;
+}));
+
+same_cl('test lists the bucket first', 'GET', $test_calls[0]['method']);
+same_cl('test sends three requests', 3, count($test_calls));
+same_cl('test opens then cancels one probe upload', array( 'POST', 'DELETE' ), array_column($probe_calls, 'method'));
+same_cl(
+	'probe is the push request under the prefix',
+	'http://s3.local/mirror/backups/migratekit-write-check.wpress?uploads=',
+	$probe_calls[0]['url']
+);
+same_cl('probe is aborted by upload id', 'http://s3.local/mirror/backups/migratekit-write-check.wpress?uploadId=mk-upload-1', $probe_calls[1]['url']);
+
+/**
+ * Storage that lets a key read but not write, as a read-only token does.
+ *
+ * @param array  $calls  Receives one "METHOD URL" line per request.
+ * @param string $denial Body of every refused write.
+ * @return callable
+ */
+$read_only_storage = static function (array &$calls, string $denial = ''): callable {
+	$denial = $denial !== '' ? $denial : '<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>';
+
+	return static function (string $method, string $url, array $headers, $body, int $timeout) use (&$calls, $denial): array {
+		$calls[] = $method . ' ' . $url;
+
+		if ($method === 'GET') {
+			return array(
+				'status'  => 200,
+				'headers' => array(),
+				'body'    => '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>',
+				'error'   => '',
+			);
+		}
+
+		return array( 'status' => 403, 'headers' => array(), 'body' => $denial, 'error' => '' );
+	};
+};
+
+$reader_settings = static function (callable $http, string $endpoint = 'https://accountid.r2.cloudflarestorage.com'): array {
+	return array(
+		'endpoint'   => $endpoint,
+		'bucket'     => 'backups',
+		'prefix'     => '',
+		'region'     => 'us-east-1',
+		'access_key' => 'AKIATEST',
+		'secret_key' => 's3cr3t',
+		'http'       => $http,
+	);
+};
+
+$reader_calls = array();
+$reader       = new S3Provider($reader_settings($read_only_storage($reader_calls)));
+$threw        = false;
+
+try {
+	$reader->test();
+} catch (\RuntimeException $e) {
+	$threw = true;
+	same_cl(
+		'read-only key fails the connection test with the fix spelled out',
+		'The bucket can be listed, but this access key cannot write to it (HTTP 403: Access Denied). '
+			. 'Backups cannot be pushed with these credentials. '
+			. 'On Cloudflare R2, create the API token with the "Object Read and Write" permission for this bucket.',
+		(string) $e->getMessage()
+	);
+}
+
+check_cl('read-only key is caught by the connection test', $threw);
+same_cl('read-only test stops at the refused write', 2, count($reader_calls));
+
+$reader_calls = array();
+$threw        = false;
+
+try {
+	$reader->upload_start('site.wpress');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	same_cl(
+		'push with a read-only key names the R2 permission',
+		'Starting the upload failed (HTTP 403: Access Denied). The access key cannot write to this bucket. '
+			. 'On Cloudflare R2, create the API token with the "Object Read and Write" permission for this bucket.',
+		(string) $e->getMessage()
+	);
+}
+
+check_cl('push with a read-only key throws', $threw);
+
+$ignored = array();
+$threw   = false;
+
+try {
+	(new S3Provider($reader_settings($read_only_storage($ignored), 'https://s3.eu-west-1.amazonaws.com')))->upload_start('site.wpress');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	same_cl(
+		'push with a read-only key gives generic advice on other S3 services',
+		'Starting the upload failed (HTTP 403: Access Denied). The access key cannot write to this bucket. '
+			. 'Give this key read and write access to this bucket.',
+		(string) $e->getMessage()
+	);
+}
+
+check_cl('generic endpoint push throws', $threw);
+
+$threw = false;
+
+try {
+	(new S3Provider($reader_settings($read_only_storage($ignored), 'https://accountid.eu.r2.cloudflarestorage.com')))->upload_start('site.wpress');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	contains_cl('jurisdictional R2 endpoints are recognised', (string) $e->getMessage(), 'On Cloudflare R2');
+}
+
+check_cl('jurisdictional endpoint push throws', $threw);
+
+$threw = false;
+
+try {
+	(new S3Provider($reader_settings($read_only_storage($ignored, '<Error><Message>Access Denied</Message></Error>'))))->upload_start('site.wpress');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	contains_cl('a denial without an error code is still explained', (string) $e->getMessage(), 'Object Read and Write');
+}
+
+check_cl('code-less denial throws', $threw);
+
+$threw = false;
+
+try {
+	(new S3Provider($reader_settings($read_only_storage($ignored, '<Error><Message>Access Denied.</Message></Error>'))))->upload_start('site.wpress');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	contains_cl('a denial worded with a full stop is still explained', (string) $e->getMessage(), 'Object Read and Write');
+}
+
+check_cl('code-less denial with a full stop throws', $threw);
+
+$threw = false;
+
+try {
+	(new S3Provider($reader_settings($read_only_storage($ignored, '<Error><Message>Request has expired</Message></Error>'))))->upload_start('site.wpress');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	same_cl('another code-less 403 gets no permission advice', 'Starting the upload failed (HTTP 403: Request has expired)', (string) $e->getMessage());
+}
+
+check_cl('code-less expired request throws', $threw);
+
+// A bad signature is also a 403 and must not be reported as missing permission.
+$misfit = new S3Provider($reader_settings(static function (string $method, string $url, array $headers, $body, int $timeout): array {
+	return array(
+		'status'  => 403,
+		'headers' => array(),
+		'body'    => '<Error><Code>SignatureDoesNotMatch</Code><Message>The request signature we calculated does not match.</Message></Error>',
+		'error'   => '',
+	);
+}));
+
+$threw = false;
+
+try {
+	$misfit->test();
+} catch (\RuntimeException $e) {
+	$threw = true;
+	same_cl(
+		'a bad signature is not called a permission problem',
+		'Listing the bucket failed (HTTP 403: The request signature we calculated does not match.)',
+		(string) $e->getMessage()
+	);
+}
+
+check_cl('bad signature throws', $threw);
+
+// Cancelling the probe is best-effort: a key allowed to start uploads but not
+// to abort them still passes, and nothing was written.
+$abort_calls  = array();
+$abort_denied = array(
+	'endpoint'   => 'http://s3.local',
+	'bucket'     => 'mirror',
+	'prefix'     => 'backups',
+	'region'     => 'us-east-1',
+	'access_key' => 'AKIATEST',
+	'secret_key' => 's3cr3t',
+	'http'       => static function (string $method, string $url, array $headers, $body, int $timeout) use (&$abort_calls): array {
+		$abort_calls[] = $method . ' ' . $url;
+		$query         = (string) parse_url($url, PHP_URL_QUERY);
+
+		if ($method === 'DELETE') {
+			return array( 'status' => 403, 'headers' => array(), 'body' => '<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>', 'error' => '' );
+		}
+
+		if (strpos($query, 'uploads=') === 0) {
+			return array( 'status' => 200, 'headers' => array(), 'body' => '<InitiateMultipartUploadResult><UploadId>probe-1</UploadId></InitiateMultipartUploadResult>', 'error' => '' );
+		}
+
+		return array( 'status' => 200, 'headers' => array(), 'body' => '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>', 'error' => '' );
+	},
+);
+
+$threw = false;
+
+try {
+	(new S3Provider($abort_denied))->test();
+} catch (\RuntimeException $e) {
+	$threw = true;
+}
+
+check_cl('a refused abort does not fail the connection test', ! $threw);
+same_cl('a refused abort is attempted once', 3, count($abort_calls));
+
+// A transport failure on the write is reported as a write failure, not a success.
+$unreachable = new S3Provider($reader_settings(static function (string $method, string $url, array $headers, $body, int $timeout): array {
+	if ($method === 'GET') {
+		return array( 'status' => 200, 'headers' => array(), 'body' => '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>', 'error' => '' );
+	}
+
+	return array( 'status' => 0, 'headers' => array(), 'body' => '', 'error' => 'cURL error 28: Operation timed out.' );
+}));
+
+$threw = false;
+
+try {
+	$unreachable->test();
+} catch (\RuntimeException $e) {
+	$threw = true;
+	contains_cl('a write that cannot reach storage is reported', (string) $e->getMessage(), 'cannot write to it (HTTP 0: cURL error 28');
+	check_cl('a transport failure gets no permission advice', strpos((string) $e->getMessage(), 'Object Read and Write') === false);
+}
+
+check_cl('unreachable write throws', $threw);
+
+// The saved-settings path behind the Cloud page, REST and CLI reports the same.
+$GLOBALS['mk_opt']['migratekit_cloud']['s3']['http'] = $read_only_storage($ignored);
+$threw                                                 = false;
+
+try {
+	Manager::test('s3');
+} catch (\RuntimeException $e) {
+	$threw = true;
+	contains_cl('Manager::test reports a read-only key', (string) $e->getMessage(), 'Backups cannot be pushed with these credentials');
+}
+
+check_cl('Manager::test throws for a read-only key', $threw);
 
 // ---------------------------------------------------------------------------
 echo "\n[4] Manager option semantics\n";
@@ -1208,6 +1471,636 @@ same_cl('resave keeps the service email', 'migratekit@backups.iam.gserviceaccoun
 check_cl('resave keeps the private key', strpos($kept['private_key'], 'PRIVATE KEY') !== false);
 
 // ---------------------------------------------------------------------------
+echo "\n[11] Transfers a reload cut off: lost sessions, stale offsets, overlong files\n";
+
+$GLOBALS['cl_capture'] = static function (string $message, ?int $percent = null): void {
+	$GLOBALS['cl_msgs_seen'][] = $message;
+};
+
+/**
+ * Storage server that remembers its multipart uploads and the bytes it holds.
+ */
+class ClFakeBucket {
+
+	/** @var array<string,string> Upload id => bytes held. */
+	public $uploads = array();
+
+	/** @var array<string,string> Finished objects: key => bytes. */
+	public $objects = array();
+
+	/** @var array<int,array{method:string,url:string,headers:array<string,string>,body:string}> */
+	public $calls = array();
+
+	/** @var int */
+	private $sequence = 0;
+
+	public function __invoke(string $method, string $url, array $headers, $body, int $timeout): array {
+		$this->calls[] = array(
+			'method'  => $method,
+			'url'     => $url,
+			'headers' => $headers,
+			'body'    => is_string($body) ? $body : '',
+		);
+
+		$parsed = parse_url($url);
+
+		parse_str((string) ( $parsed['query'] ?? '' ), $query);
+
+		$segments = explode('/', ltrim((string) ( $parsed['path'] ?? '' ), '/'));
+		$key      = implode('/', array_slice($segments, 1));
+
+		if (isset($query['uploads'])) {
+			++$this->sequence;
+
+			$id = 'up-' . $this->sequence;
+
+			$this->uploads[ $id ] = '';
+
+			return array(
+				'status'  => 200,
+				'headers' => array(),
+				'body'    => '<InitiateMultipartUploadResult><UploadId>' . $id . '</UploadId></InitiateMultipartUploadResult>',
+			);
+		}
+
+		if (isset($query['uploadId']) && ! isset($this->uploads[ $query['uploadId'] ])) {
+			return array(
+				'status'  => 404,
+				'headers' => array(),
+				'body'    => '<Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>',
+			);
+		}
+
+		if (isset($query['partNumber'])) {
+			$this->uploads[ $query['uploadId'] ] .= is_string($body) ? $body : '';
+
+			return array( 'status' => 200, 'headers' => array( 'etag' => '"etag-' . $query['partNumber'] . '"' ), 'body' => '' );
+		}
+
+		if ($method === 'POST') {
+			$this->objects[ $key ] = $this->uploads[ $query['uploadId'] ];
+
+			unset($this->uploads[ $query['uploadId'] ]);
+
+			return array( 'status' => 200, 'headers' => array(), 'body' => '<CompleteMultipartUploadResult></CompleteMultipartUploadResult>' );
+		}
+
+		if ($method === 'DELETE') {
+			unset($this->uploads[ $query['uploadId'] ]);
+
+			return array( 'status' => 204, 'headers' => array(), 'body' => '' );
+		}
+
+		$content = $this->objects[ $key ] ?? null;
+
+		if ($method === 'HEAD') {
+			return array(
+				'status'  => $content === null ? 404 : 200,
+				'headers' => $content === null ? array() : array( 'content-length' => (string) strlen($content) ),
+				'body'    => '',
+			);
+		}
+
+		if ($method === 'GET' && $content !== null && preg_match('/bytes=(\d+)-(\d+)/', (string) headers_get($headers, 'Range'), $match) === 1) {
+			$start = (int) $match[1];
+
+			if ($start >= strlen($content)) {
+				return array( 'status' => 416, 'headers' => array(), 'body' => '' );
+			}
+
+			$end = min((int) $match[2], strlen($content) - 1);
+
+			return array( 'status' => 206, 'headers' => array(), 'body' => substr($content, $start, $end - $start + 1) );
+		}
+
+		return array( 'status' => 500, 'headers' => array(), 'body' => '<Error><Message>unhandled ' . $method . '</Message></Error>' );
+	}
+
+	/**
+	 * @param string $needle Literal looked for in every call's method and url.
+	 * @return int
+	 */
+	public function count(string $needle): int {
+		$total = 0;
+
+		foreach ($this->calls as $call) {
+			if (strpos($call['method'] . ' ' . $call['url'], $needle) !== false) {
+				++$total;
+			}
+		}
+
+		return $total;
+	}
+}
+
+/** Bucket whose sessions vanish as soon as they open. */
+final class ClVanishingBucket extends ClFakeBucket {
+
+	public function __invoke(string $method, string $url, array $headers, $body, int $timeout): array {
+		$response = parent::__invoke($method, $url, $headers, $body, $timeout);
+
+		if (strpos($url, 'uploads=') !== false) {
+			$this->uploads = array();
+		}
+
+		return $response;
+	}
+}
+
+/**
+ * Run a pipeline in tiny slices, as a browser would across requests.
+ *
+ * @param string $pipeline_class Pipeline with a create() factory.
+ * @param array  $state         Pipeline state (by reference).
+ * @param int    $limit         Slices before the run is given up.
+ */
+function cl_steps(string $pipeline_class, array &$state, int $limit = 400): bool {
+	$done  = false;
+	$slice = 0;
+
+	do {
+		$done = cl_slice($pipeline_class, $state);
+	} while ( ! $done && ++$slice < $limit );
+
+	return $done;
+}
+
+/**
+ * One request: long enough to start a stage and stop after its first chunk.
+ *
+ * @param string $pipeline_class Pipeline with a create() factory.
+ * @param array  $state          Pipeline state (by reference).
+ */
+function cl_slice(string $pipeline_class, array &$state): bool {
+	return $pipeline_class::create()->advance($state, new PipelineContext(null, cl_site(), $GLOBALS['cl_capture'], 0.002));
+}
+
+$bucket = new ClFakeBucket();
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	's3' => array(
+		'endpoint'   => 'http://s3.local',
+		'bucket'     => 'mirror',
+		'prefix'     => 'backups',
+		'region'     => 'us-east-1',
+		'access_key' => 'AKIATEST',
+		'secret_key' => 's3cr3t',
+		'http'       => $bucket,
+	),
+);
+
+echo "[11a] A push whose upload session expired starts over and still lands whole\n";
+
+$push_source = cl_local_file($remote_content);
+$push_state  = array(
+	'cloud'       => 's3',
+	'remote'      => 'again.wpress',
+	'source'      => $push_source,
+	'size'        => strlen($remote_content),
+	'storage_dir' => $GLOBALS['cl_tmp'] . '/job-restart',
+	'offset'      => 0,
+	'stage'       => 0,
+	'percent'     => 0,
+	'message'     => '',
+);
+
+mkdir($push_state['storage_dir'], 0777, true);
+
+// First request: the session opens and one part goes up.
+cl_slice('MigrateKit\\Cloud\\PushPipeline', $push_state);
+
+check_cl('part one is on the bucket before the cut', strlen($bucket->uploads[ $push_state['session']['upload_id'] ] ?? '') === S3Provider::CHUNK);
+same_cl('slice stops after one part', S3Provider::CHUNK, (int) $push_state['offset']);
+
+// What the Runner's status callback would have blended in for one part in three stages.
+$push_state['percent'] = 66;
+
+// The session dies while the job waits: it expired, or a lifecycle rule aborted it.
+unset($bucket->uploads[ $push_state['session']['upload_id'] ]);
+
+$done = cl_steps('MigrateKit\\Cloud\\PushPipeline', $push_state);
+
+check_cl('push completes after the session was lost', $done);
+same_cl('push restarted from byte zero to the whole file', strlen($remote_content), (int) $push_state['offset']);
+same_cl('bucket holds the whole archive', $remote_content, $bucket->objects['backups/again.wpress'] ?? null);
+same_cl('two upload sessions were opened', 2, $bucket->count('uploads='));
+same_cl('the dead session was discarded', 1, $bucket->count('DELETE '));
+check_cl('nothing is left half-uploaded on the bucket', $bucket->uploads === array());
+same_cl('the restart took the progress back with it', 0, (int) $push_state['percent']);
+check_cl(
+	'the restart was reported',
+	in_array('The upload to S3-compatible storage could not be continued — starting it again from the beginning…', $GLOBALS['cl_msgs_seen'], true)
+);
+
+echo "[11b] A session that keeps disappearing fails the step instead of looping\n";
+
+$vanishing = new ClVanishingBucket();
+
+$GLOBALS['mk_opt']['migratekit_cloud']['s3']['http'] = $vanishing;
+
+$loop_state = $push_state;
+
+$loop_state['storage_dir'] = $GLOBALS['cl_tmp'] . '/job-loop';
+$loop_state['remote']      = 'loop.wpress';
+$loop_state['offset']      = 0;
+$loop_state['stage']       = 1;
+
+// A session from an earlier slice, already gone.
+$loop_state['session'] = array( 'upload_id' => 'up-gone', 'remote' => 'loop.wpress', 'parts' => array(), 'next_part' => 1 );
+
+mkdir($loop_state['storage_dir'], 0777, true);
+
+$opened_before = $vanishing->count('uploads=');
+$loop_error    = '';
+
+try {
+	// One request: the lost session is replaced once, then the replacement is gone too.
+	cl_slice('MigrateKit\\Cloud\\PushPipeline', $loop_state);
+} catch (\RuntimeException $caught) {
+	$loop_error = $caught->getMessage();
+}
+
+check_cl('a session that keeps vanishing ends the step as a failure', $loop_error !== '');
+check_cl('the failure names the lost session', strpos($loop_error, 'no longer known') !== false);
+same_cl('exactly one replacement session per step', 1, $vanishing->count('uploads=') - $opened_before);
+
+$GLOBALS['mk_opt']['migratekit_cloud']['s3']['http'] = $bucket;
+
+echo "[11c] A download resumes exactly where the job saved, never past it\n";
+
+$small = '0123456789abcdefghij';
+
+$bucket->objects['backups/cut.wpress'] = $small;
+
+$pull_state = array(
+	'cloud'       => 's3',
+	'remote'      => 'cut.wpress',
+	'storage_dir' => $GLOBALS['cl_tmp'] . '/job-cut',
+	'target'      => $GLOBALS['cl_tmp'] . '/job-cut/pull.wpress',
+	'size'        => strlen($small),
+	'offset'      => 8,
+	'stage'       => 0,
+	'percent'     => 40,
+	'message'     => '',
+	'session'     => array( 'remote' => 'cut.wpress', 'size' => strlen($small) ),
+);
+
+mkdir($pull_state['storage_dir'], 0777, true);
+
+$transfer = new Pipeline(
+	array(
+		new \MigrateKit\Cloud\Stages\PullTransferStage(),
+	)
+);
+
+// The request that was cut off had written far past the offset the job saved.
+file_put_contents($pull_state['target'], $small . 'BYTES-WRITTEN-PAST-THE-SAVED-OFFSET');
+
+$bucket->calls = array();
+
+check_cl('download finishes', $transfer->advance($pull_state, new PipelineContext(null, cl_site(), $GLOBALS['cl_capture'], 0.0)));
+same_cl('bytes past the saved offset are dropped, not kept twice', $small, (string) file_get_contents($pull_state['target']));
+same_cl('the remote was asked for the rest only', sprintf('bytes=%d-%d', 8, 8 + S3Provider::CHUNK - 1), call_first_range($bucket->calls));
+
+// The bytes already downloaded were lost (a cleanup removed them): take the object from the top.
+file_put_contents($pull_state['target'], substr($small, 0, 5));
+
+$pull_state['offset'] = 8;
+$pull_state['stage']  = 0;
+$bucket->calls        = array();
+
+check_cl('download finishes after its bytes were lost', $transfer->advance($pull_state, new PipelineContext(null, cl_site(), $GLOBALS['cl_capture'], 0.0)));
+same_cl('a lost partial file is downloaded whole again', $small, (string) file_get_contents($pull_state['target']));
+same_cl('the remote was asked from byte zero', sprintf('bytes=0-%d', S3Provider::CHUNK - 1), call_first_range($bucket->calls));
+same_cl('offset is the whole object', strlen($small), (int) $pull_state['offset']);
+
+// An object shorter than the size announced at the start must not be published as a backup.
+$bucket->objects['backups/cut.wpress'] = 'only-half';
+
+$pull_state['offset'] = 0;
+$pull_state['stage']  = 0;
+$bucket->calls        = array();
+$early                = '';
+
+try {
+	$transfer->advance($pull_state, new PipelineContext(null, cl_site(), $GLOBALS['cl_capture'], 0.0));
+} catch (\RuntimeException $caught) {
+	$early = $caught->getMessage();
+}
+
+check_cl('a download that ends early fails', strpos($early, 'stopped early') !== false);
+check_cl('the early end names what arrived', strpos($early, '9 B of 20 B') !== false);
+
+echo "[11d] Publishing survives a cut between the move and the save\n";
+
+$publish = new Pipeline(
+	array(
+		new \MigrateKit\Cloud\Stages\PullFinishStage(),
+	)
+);
+
+$published = $backups_dir . DIRECTORY_SEPARATOR . 'cut.wpress';
+
+file_put_contents($published, $small);
+
+@unlink($pull_state['target']);
+
+$pull_state['offset'] = strlen($small);
+$pull_state['stage']  = 0;
+
+check_cl('a backup already moved into place is accepted', $publish->advance($pull_state, new PipelineContext(null, cl_site(), $GLOBALS['cl_capture'], 0.0)));
+check_cl('the job points at the published archive', realpath((string) $pull_state['archive_path']) === realpath($published));
+
+file_put_contents($published, 'an older backup with the same name');
+
+$wrong = '';
+
+$pull_state['stage'] = 0;
+
+try {
+	$publish->advance($pull_state, new PipelineContext(null, cl_site(), $GLOBALS['cl_capture'], 0.0));
+} catch (\RuntimeException $caught) {
+	$wrong = $caught->getMessage();
+}
+
+check_cl('an unrelated file of the same name is not passed off as the download', strpos($wrong, 'was not written') !== false);
+
+@unlink($published);
+
+echo "[11e] Dropbox: the session is ahead of the job, gone, or simply failing\n";
+
+$dbx = array( 'held' => 0, 'refusal' => null, 'bytes' => '' );
+
+$dbxfake = function (string $method, string $url, array $headers, $body, int $timeout) use (&$dbx): array {
+	if (strpos($url, '/files/upload_session/start') !== false) {
+		return array( 'status' => 200, 'headers' => array(), 'body' => '{"session_id":"sess-9"}' );
+	}
+
+	if (strpos($url, '/files/upload_session/append_v2') !== false) {
+		if ($dbx['refusal'] !== null) {
+			$refusal        = $dbx['refusal'];
+			$dbx['refusal'] = null;
+
+			return $refusal;
+		}
+
+		$arg    = json_decode((string) headers_get($headers, 'Dropbox-API-Arg'), true);
+		$cursor = (int) ( $arg['cursor']['offset'] ?? -1 );
+
+		// Dropbox only accepts an append at exactly the offset its session is at.
+		if ($cursor !== $dbx['held']) {
+			return array(
+				'status'  => 400,
+				'headers' => array( 'dropbox-api-result' => '{"error":{"lookup_failed":{"correct_offset":' . $dbx['held'] . '}}}' ),
+				'body'    => '',
+			);
+		}
+
+		$dbx['held']  += strlen($body);
+		$dbx['bytes'] .= $body;
+
+		return array( 'status' => 200, 'headers' => array(), 'body' => '' );
+	}
+
+	if (strpos($url, '/files/upload_session/finish') !== false) {
+		return array( 'status' => 200, 'headers' => array(), 'body' => '{"name":"done.wpress"}' );
+	}
+
+	return array( 'status' => 404, 'headers' => array(), 'body' => '' );
+};
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	'dropbox' => array(
+		'client_id'     => 'cid',
+		'client_secret' => 'cs',
+		'folder'        => 'backups',
+		'access_token'  => 'tok',
+		'http'          => $dbxfake,
+	),
+);
+
+$dropbox = Manager::provider('dropbox');
+$thirty  = str_repeat('a', 10) . str_repeat('b', 10) . str_repeat('c', 10);
+$ten     = cl_local_file($thirty);
+
+$session = $dropbox->upload_start('resume.wpress');
+
+$dropbox->upload_chunk($session, $ten, 0, 10);
+
+// What the job saved after that first chunk.
+$saved = $session;
+
+$dropbox->upload_chunk($session, $ten, 10, 10);
+$dropbox->upload_chunk($session, $ten, 20, 10);
+
+same_cl('three chunks appended', 30, $dbx['held']);
+
+// The job resumes from its saved copy while Dropbox is already at 30.
+same_cl('a stale chunk sends nothing', 0, $dropbox->upload_chunk($saved, $ten, 10, 10));
+same_cl('the session takes the offset Dropbox reported', 30, $saved['offset']);
+
+// The same answer with the offset as a bare number in the body.
+$dbx['held']     = 20;
+$saved['offset'] = 10;
+
+$dbx['refusal'] = array(
+	'status'  => 400,
+	'headers' => array(),
+	'body'    => '{"error_summary":"lookup_failed/incorrect_offset/..","error":{"lookup_failed":20}}',
+);
+
+same_cl('a bare offset is understood too', 0, $dropbox->upload_chunk($saved, $ten, 10, 10));
+same_cl('session offset follows', 20, $saved['offset']);
+
+// A session that expired: there is no position to resume from.
+$lost = false;
+
+$dbx['refusal'] = array(
+	'status'  => 409,
+	'headers' => array(),
+	'body'    => '{"error_summary":"lookup_failed/not_found/..","error":{"lookup_failed":{".tag":"not_found"}}}',
+);
+
+try {
+	$dropbox->upload_chunk($saved, $ten, 20, 10);
+} catch (MigrateKit\Cloud\SessionLostException $caught) {
+	$lost = true;
+}
+
+check_cl('an expired Dropbox session is reported as lost', $lost);
+
+// Any other failure is just a failure: retrying it later may work.
+$plain = null;
+
+$dbx['refusal'] = array( 'status' => 500, 'headers' => array(), 'body' => '' );
+
+try {
+	$dropbox->upload_chunk($saved, $ten, 20, 10);
+} catch (\RuntimeException $caught) {
+	$plain = $caught;
+}
+
+check_cl('a server error is not mistaken for a lost session', $plain !== null && ! $plain instanceof MigrateKit\Cloud\SessionLostException);
+same_cl('the failed append left the session offset alone', 20, $saved['offset']);
+
+// Through the stage: the job is behind, Dropbox is ahead, and the file still lands whole.
+$dbx_stage = array(
+	'cloud'       => 'dropbox',
+	'remote'      => 'resume.wpress',
+	'source'      => $ten,
+	'size'        => 30,
+	'storage_dir' => $GLOBALS['cl_tmp'] . '/job-dropbox',
+	'offset'      => 10,
+	'session'     => array( 'remote' => 'resume.wpress', 'session' => 'sess-9', 'offset' => 10 ),
+	'stage'       => 1,
+	'percent'     => 33,
+	'message'     => '',
+);
+
+mkdir($dbx_stage['storage_dir'], 0777, true);
+
+// A slice the job never saved had already put the second chunk up.
+$dbx['held']  = 20;
+$dbx['bytes'] = str_repeat('a', 10) . str_repeat('b', 10);
+
+check_cl('Dropbox push completes across the stale offset', cl_steps('MigrateKit\\Cloud\\PushPipeline', $dbx_stage));
+same_cl('the job skipped to where Dropbox was, then finished', 30, (int) $dbx_stage['offset']);
+same_cl('Dropbox holds every byte exactly once', $thirty, $dbx['bytes']);
+same_cl('nothing was appended past the end', 30, $dbx['held']);
+
+echo "[11f] Google Drive: the session reports its own position\n";
+
+$gdrive = array( 'held' => 0, 'total' => 0, 'expired' => false );
+
+$gfake = function (string $method, string $url, array $headers, $body, int $timeout) use (&$gdrive): array {
+	if (strpos($url, 'upload/drive/v3/files?') !== false) {
+		return array(
+			'status'  => 200,
+			'headers' => array( 'location' => 'http://upload.local/session-42' ),
+			'body'    => '',
+		);
+	}
+
+	if ($gdrive['expired']) {
+		return array( 'status' => 410, 'headers' => array(), 'body' => '' );
+	}
+
+	if ( ! empty($gdrive['refused']) ) {
+		return array( 'status' => 403, 'headers' => array(), 'body' => '{"error":{"code":403,"message":"upload session expired"}}' );
+	}
+
+	$range = (string) headers_get($headers, 'Content-Range');
+
+	if (preg_match('#^bytes=(\d+)-(\d+)/(\d+)$#', $range, $match) === 1) {
+		$gdrive['total'] = (int) $match[3];
+
+		// Bytes the server already holds are acknowledged, not stored again.
+		$gdrive['held'] = max($gdrive['held'], ( (int) $match[2] ) + 1);
+
+		if ($gdrive['held'] >= $gdrive['total']) {
+			return array( 'status' => 200, 'headers' => array(), 'body' => '{"id":"file-1"}' );
+		}
+
+		return array(
+			'status'  => 308,
+			'headers' => array( 'Range' => 'bytes=0-' . ( $gdrive['held'] - 1 ) ),
+			'body'    => '',
+		);
+	}
+
+	if (strpos($range, 'bytes */') === 0) {
+		if ($gdrive['held'] >= $gdrive['total']) {
+			return array( 'status' => 200, 'headers' => array(), 'body' => '{"id":"file-1"}' );
+		}
+
+		return array(
+			'status'  => 308,
+			'headers' => array( 'Range' => 'bytes=0-' . ( $gdrive['held'] - 1 ) ),
+			'body'    => '',
+		);
+	}
+
+	return array( 'status' => 500, 'headers' => array(), 'body' => '' );
+};
+
+$GLOBALS['mk_opt']['migratekit_cloud'] = array(
+	'gdrive' => array(
+		'client_id'     => 'gid',
+		'client_secret' => 'gsec',
+		'folder'        => 'fldr-9',
+		'access_token'  => 'gtok',
+		'http'          => $gfake,
+	),
+);
+
+$drive = Manager::provider('gdrive');
+
+$session = $drive->upload_start('drive.wpress');
+
+$drive->upload_chunk($session, $ten, 0, 10);
+$drive->upload_chunk($session, $ten, 10, 10);
+
+same_cl('two chunks in', 20, $gdrive['held']);
+
+// A slice cut off after two chunks left the job saved at one.
+$session['offset'] = 10;
+
+$drive->upload_chunk($session, $ten, 10, 10);
+
+same_cl('the session takes the position Drive reported', 20, $session['offset']);
+
+$drive->upload_chunk($session, $ten, 20, 10);
+
+check_cl('upload is done once Drive confirms the last byte', ! empty($session['done']));
+
+// The reply to the last chunk was lost with a cut-off request: ask the session instead of failing.
+$session['done']   = false;
+$session['offset'] = 20;
+
+$drive->upload_finish($session);
+
+check_cl('a finished upload the job never saw confirmed is recognised', ! empty($session['done']));
+
+$session['done'] = false;
+$gdrive['held']  = 10;
+
+$not_complete = false;
+
+try {
+	$drive->upload_finish($session);
+} catch (MigrateKit\Cloud\SessionLostException $caught) {
+	$not_complete = true;
+}
+
+check_cl('an upload the session says is short is not passed off as complete', $not_complete);
+
+$gdrive['expired'] = true;
+
+$expired = false;
+
+try {
+	$drive->upload_chunk($session, $ten, 20, 10);
+} catch (MigrateKit\Cloud\SessionLostException $caught) {
+	$expired = true;
+}
+
+check_cl('an expired Drive session is reported as lost', $expired);
+
+// Drive answers any 4xx on a resumable upload with "start over".
+$gdrive['expired'] = false;
+$gdrive['refused'] = true;
+
+$refused = false;
+
+try {
+	$drive->upload_chunk($session, $ten, 20, 10);
+} catch (MigrateKit\Cloud\SessionLostException $caught) {
+	$refused = true;
+}
+
+check_cl('a refused Drive session is reported as lost', $refused);
+
+// ---------------------------------------------------------------------------
 echo "\n";
 printf("passed: %d, failed: %d\n", $GLOBALS['cl_pass'] ?? 0, $GLOBALS['cl_fail'] ?? 0);
 exit(( $GLOBALS['cl_fail'] ?? 0 ) > 0 ? 1 : 0);
@@ -1258,6 +2151,22 @@ function call_complete(array $calls): string {
 	}
 
 	return '';
+}
+
+/**
+ * @param array<int,array{method:string,url:string,headers:array,body:string}> $calls
+ * @return string|null
+ */
+function call_first_range(array $calls): ?string {
+	foreach ($calls as $call) {
+		$value = headers_get((array) $call['headers'], 'Range');
+
+		if ($value !== null) {
+			return $value;
+		}
+	}
+
+	return null;
 }
 
 /**

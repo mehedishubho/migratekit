@@ -1,7 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import { config, formatBytes, formatDate, post, runJob } from '../api';
-import type { JobState } from '../api';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { config, formatBytes, formatDate, post, type JobState } from '../api';
+import JobProgress from '../JobProgress.vue';
+import {
+	hideInline,
+	isActive,
+	launch,
+	settled,
+	showInline,
+	withIntents,
+	type JobIntent,
+	type TrackedJob,
+} from '../jobs';
 
 interface ProviderStatus {
 	id: string;
@@ -72,8 +82,6 @@ const finishing = ref('');
 const notice = ref('');
 const error = ref('');
 const pushSource = ref('');
-const state = ref<JobState | null>(null);
-const transferring = ref(false);
 const drafts = ref<Record<string, Record<string, string>>>({});
 
 // One-click connect: the server returns an authorisation URL plus a state
@@ -87,6 +95,10 @@ const dropboxAdvanced = ref(false);
 const current = computed(() => providers.value.find((p) => p.id === selected.value) || null);
 const currentLabel = computed(() => current.value?.label || selected.value);
 const readyProviders = computed(() => providers.value.filter((p) => p.ready));
+
+/** The transfers this page shows: the ones started here, or the ones an earlier visit left unfinished. */
+const transfers = withIntents('push', 'pull', 'cloud-restore', 'restore');
+const transferring = computed(() => transfers.value.some(isActive));
 const transfersBusy = computed(() => transferring.value || filesLoading.value);
 const isS3 = computed(() => selected.value === 's3');
 const isDropbox = computed(() => selected.value === 'dropbox');
@@ -427,6 +439,17 @@ function cancelConnect(): void {
 	notice.value = '';
 }
 
+/** Start a transfer and show it in the list; resolves once it has come to rest. */
+async function startTransfer(intent: JobIntent, start: Promise<JobState>): Promise<TrackedJob | null> {
+	try {
+		return await launch(intent, start);
+	} catch (caught) {
+		error.value = caught instanceof Error ? caught.message : 'The transfer could not be started.';
+
+		return null;
+	}
+}
+
 async function pull(remote: RemoteObject): Promise<void> {
 	if (transfersBusy.value) {
 		return;
@@ -434,25 +457,11 @@ async function pull(remote: RemoteObject): Promise<void> {
 
 	notice.value = '';
 	error.value = '';
-	transferring.value = true;
 
-	try {
-		const finished = await runJob(
-			post<JobState>('migratekit_cloud_pull', { provider: selected.value, remote: remote.name }),
-			'migratekit_cloud_step',
-			(s) => {
-				state.value = s;
-			}
-		);
-
-		notice.value = `Fetched ${remote.name} from ${currentLabel.value} — it is ready in Backups.`;
-		void finished;
-	} catch (caught) {
-		error.value = caught instanceof Error ? caught.message : 'The download could not be completed.';
-	} finally {
-		transferring.value = false;
-		state.value = null;
-	}
+	await startTransfer(
+		'pull',
+		post<JobState>('migratekit_cloud_pull', { provider: selected.value, remote: remote.name }),
+	);
 }
 
 async function push(): Promise<void> {
@@ -462,26 +471,41 @@ async function push(): Promise<void> {
 
 	notice.value = '';
 	error.value = '';
-	transferring.value = true;
 
-	try {
-		const finished = await runJob(
-			post<JobState>('migratekit_cloud_push', { provider: selected.value, name: pushSource.value }),
-			'migratekit_cloud_step',
-			(s) => {
-				state.value = s;
-			}
-		);
-
-		notice.value = `Pushed ${pushSource.value} to ${currentLabel.value}.`;
-		void finished;
-	} catch (caught) {
-		error.value = caught instanceof Error ? caught.message : 'The upload could not be completed.';
-	} finally {
-		transferring.value = false;
-		state.value = null;
-	}
+	await startTransfer(
+		'push',
+		post<JobState>('migratekit_cloud_push', { provider: selected.value, name: pushSource.value }),
+	);
 }
+
+/** Fetch a remote backup and restore it on this site, all in one go. */
+async function restoreRemote(remote: RemoteObject): Promise<void> {
+	if (transfersBusy.value) {
+		return;
+	}
+
+	if (
+		!window.confirm(
+			`Restore ${remote.name} on this site? It is fetched from ${currentLabel.value} first, then this site's content, database and files are replaced.`,
+		)
+	) {
+		return;
+	}
+
+	notice.value = '';
+	error.value = '';
+
+	await startTransfer(
+		'cloud-restore',
+		post<JobState>('migratekit_cloud_pull', { provider: selected.value, remote: remote.name, restore: true }),
+	);
+}
+
+// A transfer that came to rest changed what is here and what is on the cloud.
+watch(settled, () => {
+	void loadObjects();
+	void loadBackups();
+});
 
 async function remove(remote: RemoteObject): Promise<void> {
 	if (!window.confirm(`Delete ${remote.name} from ${currentLabel.value}? This cannot be undone.`)) {
@@ -500,6 +524,9 @@ async function remove(remote: RemoteObject): Promise<void> {
 }
 
 onMounted(() => {
+	// The page draws its transfers' progress where it always did; the panel above leaves them to the page.
+	showInline('push', 'pull', 'cloud-restore', 'restore');
+
 	const params = new URLSearchParams(window.location.search);
 
 	if (params.get('notice') === 'connected' && params.get('cloud')) {
@@ -507,8 +534,10 @@ onMounted(() => {
 		notice.value = `${labelFor(id)} connected successfully. Backups on that account are listed below.`;
 	}
 
-	loadProviders();
+	void loadProviders();
 });
+
+onUnmounted(() => hideInline('push', 'pull', 'cloud-restore', 'restore'));
 </script>
 
 <template>
@@ -525,6 +554,8 @@ onMounted(() => {
 
 		<p v-if="error" class="mk-error">{{ error }}</p>
 		<p v-if="notice" class="mk-success">{{ notice }}</p>
+
+		<JobProgress v-for="job in transfers" :key="job.key" :job="job" />
 
 		<div v-if="providers.length > 1" class="mk-tabs">
 			<button
@@ -569,6 +600,8 @@ onMounted(() => {
 						<strong>Where to find these:</strong> create a bucket and an access key in the
 						<a href="https://console.aws.amazon.com/iam/" target="_blank" rel="noreferrer">AWS console</a>.
 						Any S3-compatible storage works here — DigitalOcean Spaces, Wasabi, Backblaze B2, Cloudflare R2, MinIO.
+						The key must be allowed to read <em>and</em> write: on Cloudflare R2, create the API token with
+						"Object Read and Write".
 					</p>
 				</template>
 
@@ -832,6 +865,14 @@ onMounted(() => {
 									class="mk-link"
 									type="button"
 									:disabled="transfersBusy"
+									@click="restoreRemote(remote)"
+								>
+									Restore
+								</button>
+								<button
+									class="mk-link"
+									type="button"
+									:disabled="transfersBusy"
 									@click="pull(remote)"
 								>
 									Pull here
@@ -867,14 +908,6 @@ onMounted(() => {
 						Save the settings above, then {{ isDrive ? 'run Test connection' : 'connect account' }} — transfers
 						appear here.
 					</span>
-				</div>
-			</div>
-
-			<div v-if="transferring" class="mk-progress">
-				<div class="mk-bar"><span :style="{ width: `${state?.percent ?? 0}%` }"></span></div>
-				<div class="mk-progress-meta">
-					{{ state?.message || 'Transferring…' }}
-					<span>{{ state?.percent ?? 0 }}%</span>
 				</div>
 			</div>
 		</template>

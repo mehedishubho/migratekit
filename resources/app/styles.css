@@ -711,3 +711,60 @@ a.mk-tile:focus-visible {
 	align-items: center;
 	gap: 8px;
 }
+
+/* One task's progress: drawn in place by the page that runs it, or by the panel above. */
+.mk-job .mk-progress-meta {
+	color: var(--mk-text);
+	font-weight: 600;
+}
+
+.mk-job .mk-status {
+	margin-top: 4px;
+	font-size: 13px;
+	line-height: 1.45;
+}
+
+.mk-job .mk-status.is-ok {
+	color: var(--mk-success);
+}
+
+.mk-job .mk-status.is-bad {
+	color: var(--mk-danger);
+}
+
+.mk-job .mk-status.is-warn {
+	color: var(--mk-warn);
+}
+
+.mk-job .mk-warn {
+	margin-top: 6px;
+	font-size: 13px;
+}
+
+/* A task that came to rest short of the end is not drawn as progress made. */
+.mk-job.is-failed .mk-bar span,
+.mk-job.is-stopped .mk-bar span,
+.mk-job.is-paused .mk-bar span {
+	background: var(--mk-muted);
+}
+
+/* The panel above a page: the same rows in a tighter card. */
+.mk-jobs {
+	padding: 16px 20px;
+	margin-bottom: 20px;
+}
+
+.mk-jobs .mk-card-head {
+	margin-bottom: 0;
+}
+
+.mk-jobs .mk-card-head + .mk-job {
+	margin-top: 0;
+}
+
+@media (max-width: 782px) {
+	.mk-jobs {
+		padding: 16px;
+		border-radius: 10px;
+	}
+}

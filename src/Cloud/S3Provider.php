@@ -21,6 +21,9 @@ final class S3Provider implements CloudProviderInterface {
 	/** @var int Part size for multipart uploads and ranged downloads. */
 	public const CHUNK = 8 * 1024 * 1024;
 
+	/** @var string Object key the connection test opens a multipart upload on and cancels; nothing is ever stored under it. */
+	private const WRITE_PROBE = 'migratekit-write-check.wpress';
+
 	/** @var array<string,mixed> */
 	private $config;
 
@@ -102,13 +105,13 @@ final class S3Provider implements CloudProviderInterface {
 	public function test(): void {
 		$response = $this->request('GET', $this->bucket_base(), array(), array(), null);
 
-		if ($response['status'] === 200) {
-			return;
+		if ($response['status'] !== 200) {
+			throw new \RuntimeException(
+				$this->message('Listing the bucket failed', $response)
+			);
 		}
 
-		throw new \RuntimeException(
-			$this->message('Listing the bucket failed', $response)
-		);
+		$this->assert_writable();
 	}
 
 	public function display(): array {
@@ -130,7 +133,9 @@ final class S3Provider implements CloudProviderInterface {
 		$response = $this->request('POST', $this->object_path($remote), array(), array( 'uploads' => '' ), null);
 
 		if ($response['status'] !== 200) {
-			throw new \RuntimeException($this->message('Starting the upload failed', $response));
+			throw new \RuntimeException(
+				$this->message('Starting the upload failed', $response, 'The access key cannot write to this bucket')
+			);
 		}
 
 		$xml = simplexml_load_string($response['body']);
@@ -179,7 +184,14 @@ final class S3Provider implements CloudProviderInterface {
 		);
 
 		if ($response['status'] !== 200 || ! isset($response['headers']['etag'])) {
-			throw new \RuntimeException($this->message('Uploading part ' . $part . ' failed', $response));
+			// The upload id expired or was aborted elsewhere; none of the parts sent so far can be completed.
+			if ($response['status'] === 404 && $this->error_code($response['body']) === 'NoSuchUpload') {
+				throw new SessionLostException('The upload to ' . $this->label() . ' is no longer known there.');
+			}
+
+			throw new \RuntimeException(
+				$this->message('Uploading part ' . $part . ' failed', $response, 'The access key cannot write to this bucket')
+			);
 		}
 
 		$parts = is_array($session['parts']) ? $session['parts'] : array();
@@ -223,7 +235,23 @@ final class S3Provider implements CloudProviderInterface {
 		);
 
 		if ($response['status'] !== 200) {
-			throw new \RuntimeException($this->message('Completing the upload failed', $response));
+			throw new \RuntimeException(
+				$this->message('Completing the upload failed', $response, 'The access key cannot write to this bucket')
+			);
+		}
+	}
+
+	public function upload_abort(array $session): void {
+		$response = $this->request(
+			'DELETE',
+			$this->object_path((string) $session['remote']),
+			array(),
+			array( 'uploadId' => (string) $session['upload_id'] ),
+			null
+		);
+
+		if ($response['status'] !== 204 && $response['status'] !== 404) {
+			throw new \RuntimeException($this->message('Discarding the unfinished upload failed', $response));
 		}
 	}
 
@@ -425,22 +453,109 @@ final class S3Provider implements CloudProviderInterface {
 	}
 
 	/**
+	 * A key may list the bucket and still be refused the first write of a
+	 * push: open that upload on a probe key, then cancel it.
+	 *
+	 * @return void
+	 */
+	private function assert_writable(): void {
+		$probe    = $this->object_path(self::WRITE_PROBE);
+		$response = $this->request('POST', $probe, array(), array( 'uploads' => '' ), null);
+
+		if ($response['status'] !== 200) {
+			throw new \RuntimeException(
+				$this->message(
+					'The bucket can be listed, but this access key cannot write to it',
+					$response,
+					'Backups cannot be pushed with these credentials'
+				)
+			);
+		}
+
+		$xml = simplexml_load_string($response['body']);
+
+		if ($xml instanceof \SimpleXMLElement && isset($xml->UploadId)) {
+			$this->request('DELETE', $probe, array(), array( 'uploadId' => (string) $xml->UploadId ), null);
+		}
+	}
+
+	/**
 	 * @param string                                             $headline Message prefix.
 	 * @param array{status:int,headers:array<string,string>,body:string,error:string} $response Transport response.
+	 * @param string                                             $denied    Sentence added when the key lacks the permission.
 	 * @return string
 	 */
-	private function message(string $headline, array $response): string {
+	private function message(string $headline, array $response, string $denied = 'The access key is not allowed to do that'): string {
 		$detail = $response['error'] !== ''
 			? $response['error']
 			: $this->first_error_line($response['body']);
 
-		return sprintf(
+		$text = sprintf(
 			'%s (HTTP %d%s%s)',
 			$headline,
 			$response['status'],
 			$detail !== '' ? ': ' : '',
 			$detail
 		);
+
+		if ($denied === '' || ! $this->is_denied($response, $detail)) {
+			return $text;
+		}
+
+		return $text . '. ' . $denied . '. ' . $this->permission_advice();
+	}
+
+	/**
+	 * S3 also answers 403 for a bad signature or an unknown key: only an
+	 * AccessDenied error is a key that is valid but not permitted.
+	 *
+	 * @param array{status:int,headers:array<string,string>,body:string,error:string} $response Transport response.
+	 * @param string                                             $detail   Error detail already extracted.
+	 * @return bool
+	 */
+	private function is_denied(array $response, string $detail): bool {
+		if ($response['status'] !== 403 || $response['error'] !== '') {
+			return false;
+		}
+
+		$code = $this->error_code($response['body']);
+
+		return $code === 'AccessDenied'
+			|| ( $code === '' && preg_match('/^access denied\b/i', $detail) === 1 );
+	}
+
+	/**
+	 * Machine-readable code of an S3 XML error response, when there is one.
+	 *
+	 * @param string $body Response body.
+	 * @return string
+	 */
+	private function error_code(string $body): string {
+		if ($body === '') {
+			return '';
+		}
+
+		$use_errors = libxml_use_internal_errors(true);
+		$xml        = simplexml_load_string($body);
+		libxml_clear_errors();
+		libxml_use_internal_errors($use_errors);
+
+		return $xml instanceof \SimpleXMLElement && isset($xml->Code) ? trim((string) $xml->Code) : '';
+	}
+
+	/**
+	 * How to give the key write access, in the terms the storage service uses.
+	 *
+	 * @return string
+	 */
+	private function permission_advice(): string {
+		$host = strtolower((string) parse_url($this->field('endpoint'), PHP_URL_HOST));
+
+		if (preg_match('#(^|\.)r2\.cloudflarestorage\.com$#', $host) === 1) {
+			return 'On Cloudflare R2, create the API token with the "Object Read and Write" permission for this bucket.';
+		}
+
+		return 'Give this key read and write access to this bucket.';
 	}
 
 	/**

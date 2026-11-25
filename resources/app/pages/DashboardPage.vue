@@ -1,17 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
-import {
-	ACTIVE_EXPORT_KEY,
-	config,
-	driveJob,
-	formatBytes,
-	friendlyInterval,
-	inWords,
-	post,
-	runJob,
-	type JobState,
-	type RetryNotice,
-} from '../api';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { config, formatBytes, friendlyInterval, inWords, post, type JobState } from '../api';
+import JobProgress from '../JobProgress.vue';
+import { discardSettled, hideInline, isActive, launch, latestJob, settled, showInline } from '../jobs';
 import { saveStarterSchedule } from '../presets';
 
 interface Backup {
@@ -43,24 +34,13 @@ const starterBusy = ref(false);
 const notice = ref('');
 const error = ref('');
 
-/** One-click "back up now" straight from the dashboard. */
-const running = ref(false);
-const job = ref<JobState | null>(null);
-const done = ref(false);
+/** Set from the click until the server has started the job, so a second click cannot start another. */
+const starting = ref(false);
 
-/** Set when the user stops the run; the polling loop checks it between steps. */
-const stopping = ref(false);
-
-/** Set while a step is retried because the server did not answer. */
-const retrying = ref<RetryNotice | null>(null);
-
-/** A backup that failed and would be orphaned by a retry. */
-const failedJobId = ref('');
-
-/** Screen readers hear stage transitions, not every poll tick. */
-const announcement = ref('');
-let announcedJobId = '';
-let announcedStage = -1;
+/** The backup this card shows: the one started here, or the one an earlier visit left unfinished. */
+const job = latestJob('backup');
+const running = computed(() => starting.value || isActive(job.value));
+const done = computed(() => job.value !== null && job.value.status === 'done');
 
 const enabledSchedules = computed<Schedule[]>(() => (schedules.value ?? []).filter((item) => item.enabled));
 
@@ -115,187 +95,26 @@ const lastBackupText = computed<string>(() => {
 	return seconds < 120 ? 'just now' : `${inWords(seconds)} ago`;
 });
 
-/** The run-now button starts the job immediately and drives it like the Export page. */
+/** The run-now button starts the job immediately and shows it like the Export page. */
 async function backUpNow(): Promise<void> {
 	if (running.value) {
 		return;
 	}
 
-	await discardFailedJob();
-
-	running.value = true;
-	stopping.value = false;
 	error.value = '';
-	done.value = false;
-	job.value = null;
-
-	let jobId = '';
+	starting.value = true;
 
 	try {
+		// A backup that gave up is dropped first, so its half-built archive does not stay on the disk.
+		await discardSettled('backup');
+
 		// Uncompressed, like the Export page's default: gzip spends minutes of CPU on a large site's already-compressed media.
-		await runJob(
-			post<JobState>('migratekit_export_start'),
-			'migratekit_export_step',
-			(state) => {
-				trackJob(state);
-				jobId = state.id;
-			},
-			() => stopping.value,
-			trackRetry,
-		);
-
-		if (stopping.value) {
-			return;
-		}
-
-		finishRun();
+		await launch('backup', post<JobState>('migratekit_export_start'));
 	} catch (caught) {
-		if (stopping.value) {
-			return;
-		}
-
 		error.value = caught instanceof Error ? caught.message : 'The backup failed.';
-		failedJobId.value = jobId;
 	} finally {
-		running.value = false;
-		retrying.value = null;
+		starting.value = false;
 	}
-}
-
-function trackRetry(notice: RetryNotice): void {
-	retrying.value = notice;
-}
-
-function trackJob(state: JobState): void {
-	job.value = state;
-
-	if (state.id) {
-		window.localStorage.setItem(ACTIVE_EXPORT_KEY, JSON.stringify({ id: state.id }));
-	}
-
-	if (state.id !== announcedJobId || state.stage !== announcedStage || state.done) {
-		announcedJobId = state.id;
-		announcedStage = state.stage;
-		announcement.value = state.done ? `Backup complete: ${state.archiveName}` : state.message;
-	}
-}
-
-/** A finished run clears its resume marker and refreshes the stale tiles. */
-function finishRun(): void {
-	done.value = true;
-	failedJobId.value = '';
-	window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
-	void reloadAll();
-}
-
-/** Retry discards the failed job's server-side working directory first. */
-async function discardFailedJob(): Promise<void> {
-	const id = failedJobId.value;
-	failedJobId.value = '';
-
-	if (!id) {
-		return;
-	}
-
-	window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
-
-	try {
-		await post('migratekit_job_cancel', { job_id: id });
-	} catch {
-		// An uncleanable leftover is harmless; the retry proceeds regardless.
-	}
-}
-
-/** Stop the running backup. Cancels the job server-side and clears the resume marker. */
-async function stopBackup(): Promise<void> {
-	if (!running.value || job.value === null) {
-		return;
-	}
-
-	stopping.value = true;
-
-	try {
-		await post('migratekit_job_cancel', { job_id: job.value.id });
-	} catch {
-		// The polling loop stops on its own; cleanup can fail without harm.
-	}
-
-	window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
-	notice.value = 'Backup stopped — nothing on your site was changed.';
-}
-
-/** After a refresh, or a failed run, pick the in-flight backup back up where it paused. */
-async function resumeActiveJob(announce = false): Promise<void> {
-	let id = '';
-
-	try {
-		const raw = window.localStorage.getItem(ACTIVE_EXPORT_KEY);
-		id = raw ? (((JSON.parse(raw) as { id?: string }).id) ?? '') : '';
-	} catch {
-		id = '';
-	}
-
-	if (!id) {
-		return;
-	}
-
-	running.value = true;
-	stopping.value = false;
-	error.value = '';
-	done.value = false;
-
-	let state: JobState;
-
-	try {
-		state = await post<JobState>('migratekit_status', { job_id: id });
-	} catch {
-		// The job is gone (finished elsewhere or cancelled); drop the marker quietly.
-		window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
-
-		if (announce) {
-			error.value = 'That backup is no longer on this server. Start a new one with "Back up now".';
-		}
-
-		running.value = false;
-		return;
-	}
-
-	if (state.done) {
-		window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
-		running.value = false;
-		return;
-	}
-
-	try {
-		await driveJob(state, 'migratekit_export_step', trackJob, () => stopping.value, trackRetry);
-
-		if (stopping.value) {
-			return;
-		}
-
-		finishRun();
-	} catch (caught) {
-		if (stopping.value) {
-			return;
-		}
-
-		error.value = caught instanceof Error ? caught.message : 'The backup could not continue.';
-		failedJobId.value = id;
-	} finally {
-		running.value = false;
-		retrying.value = null;
-	}
-}
-
-/** Continue a failed backup from where it stopped instead of starting over. */
-function resumeBackup(): void {
-	if (running.value) {
-		return;
-	}
-
-	failedJobId.value = '';
-	error.value = '';
-	void resumeActiveJob(true);
 }
 
 /** Reload every stat source; the retry links on failed tiles call this. */
@@ -311,12 +130,10 @@ async function reloadAll(): Promise<void> {
 	await loadSchedules();
 }
 
-/** Leaving mid-backup stalls the job; make the tab close deliberate. */
-function confirmLeave(event: BeforeUnloadEvent): void {
-	if (running.value) {
-		event.preventDefault();
-	}
-}
+/** A backup that came to rest changes what the tiles say. */
+watch(settled, () => {
+	void reloadAll();
+});
 
 /** The dashboard starter button also flips on automatic backups in one click. */
 async function createStarter(): Promise<void> {
@@ -349,24 +166,24 @@ async function loadSchedules(): Promise<void> {
 	}
 }
 
+// The card draws its backup's progress where it always did; the panel above leaves it to the page.
 onMounted(() => {
-	window.addEventListener('beforeunload', confirmLeave);
+	showInline('backup');
 
-	void reloadAll().then(() => resumeActiveJob());
+	void reloadAll();
 });
 
-onUnmounted(() => {
-	window.removeEventListener('beforeunload', confirmLeave);
-});
+onUnmounted(() => hideInline('backup'));
 
 function nextRunText(schedule: Schedule): string {
 	if (!schedule.next_run) {
 		return 'not run yet';
 	}
 
-	const diff = schedule.next_run - Date.now();
+	// The server tells the moment in seconds.
+	const diff = schedule.next_run - Date.now() / 1000;
 
-	return diff <= 60_000 ? 'due now' : `next run in ${inWords(diff / 1000)}`;
+	return diff <= 60 ? 'due now' : `next run in ${inWords(diff)}`;
 }
 </script>
 
@@ -439,13 +256,7 @@ function nextRunText(schedule: Schedule): string {
 		</div>
 
 		<div v-if="notice" class="mk-success">{{ notice }}</div>
-		<p v-if="error" class="mk-error">
-			{{ error }}
-			<button v-if="failedJobId" class="mk-link" type="button" @click="resumeBackup">
-				Resume the backup
-			</button>
-			<button v-if="failedJobId" class="mk-link" type="button" @click="backUpNow">Start over</button>
-		</p>
+		<p v-if="error" class="mk-error">{{ error }}</p>
 
 		<p v-if="backups && backups.length === 0" class="mk-warn">
 			You have no backups yet — a single click on "Back up this site" fixes that.
@@ -465,35 +276,11 @@ function nextRunText(schedule: Schedule): string {
 					<a class="mk-link" href="?page=migratekit-export">More options — find &amp; replace, exclusions →</a>
 				</div>
 
-				<div v-if="job" class="mk-progress">
-					<div
-						class="mk-bar"
-						role="progressbar"
-						aria-label="Backup progress"
-						aria-valuemin="0"
-						aria-valuemax="100"
-						:aria-valuenow="job.percent"
-					>
-						<span :style="{ width: job.percent + '%' }"></span>
-					</div>
-					<div class="mk-progress-meta">
-						<span>{{ stopping ? 'Stopping…' : job.message || 'Working…' }}</span>
-						<span class="mk-progress-side">
-							<span>{{ job.percent }}%</span>
-							<button v-if="running" class="mk-link" type="button" :disabled="stopping" @click="stopBackup">
-								Stop
-							</button>
-						</span>
-					</div>
-					<p v-if="running" class="mk-status">
-						Leaving this page is safe — the backup pauses and resumes when you return, and your live site is never touched.
+				<JobProgress v-if="job" :job="job">
+					<p v-if="done" class="mk-status">
+						<a class="mk-link" href="?page=migratekit-backups">View it under Backups</a>
 					</p>
-					<p v-if="retrying" class="mk-warn" role="status">
-						The server did not answer ({{ retrying.message }}). Retrying in {{ retrying.delaySeconds }}s — attempt
-						{{ retrying.attempt }}. Nothing is lost: the backup continues from where it stopped.
-					</p>
-					<span class="mk-sr-only" aria-live="polite">{{ announcement }}</span>
-				</div>
+				</JobProgress>
 			</div>
 
 			<div class="mk-action-card">
@@ -537,10 +324,6 @@ function nextRunText(schedule: Schedule): string {
 				</div>
 			</div>
 		</div>
-
-		<p v-if="done && job" class="mk-success">
-			Backup created: <strong class="mk-mono">{{ job.archiveName }}</strong> — <a href="?page=migratekit-backups">view it under Backups</a>.
-		</p>
 
 		<p class="mk-dash-foot">
 			{{ config.siteCount === 1 ? 'This site' : `This network (${config.siteCount} sites)` }} is served by MigrateKit

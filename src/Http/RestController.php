@@ -580,16 +580,26 @@ final class RestController {
 	}
 
 	/**
+	 * With `restore` in the body, the backup is restored on this site as soon
+	 * as it has arrived; the final step then names the restore job.
+	 *
 	 * @param mixed $request Request.
 	 * @return WP_REST_Response|WP_Error
 	 */
 	public static function provider_pull($request) {
-		$params = self::params($request);
-
-		$remote = isset($params['remote']) ? basename((string) $params['remote']) : '';
+		$params  = self::params($request);
+		$remote  = isset($params['remote']) ? basename((string) $params['remote']) : '';
+		$restore = ! empty( $params['restore'] );
 
 		try {
-			return new WP_REST_Response(Runner::start_pull((string) $request['provider_id'], $remote), 201);
+			$state = Runner::start_pull(
+				(string) $request['provider_id'],
+				$remote,
+				$restore,
+				$restore ? Options::import($params) : array()
+			);
+
+			return new WP_REST_Response($state, 201);
 		} catch (\Throwable $e) {
 			return self::error($e, 400);
 		}

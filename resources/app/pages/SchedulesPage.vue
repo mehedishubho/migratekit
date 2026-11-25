@@ -13,6 +13,7 @@ import {
 	type RetryNotice,
 } from '../api';
 import { saveStarterSchedule } from '../presets';
+import { holdBeforeUnload, releaseBeforeUnload } from '../leave';
 
 interface ScheduleOptions {
 	compression: string;
@@ -261,6 +262,9 @@ async function drive(schedule: Schedule, start: JobState | Promise<JobState>): P
 	runJobState.value = null;
 	retrying.value = null;
 
+	// This run stays behind when the page is left, so leaving it has to ask first.
+	holdBeforeUnload();
+
 	let jobId = '';
 
 	const track = (current: JobState): void => {
@@ -284,6 +288,7 @@ async function drive(schedule: Schedule, start: JobState | Promise<JobState>): P
 	} catch (caught) {
 		await settle(schedule, jobId, caught);
 	} finally {
+		releaseBeforeUnload();
 		forgetRun();
 		runJobState.value = null;
 		retrying.value = null;
@@ -349,9 +354,10 @@ function nextRunLabel(schedule: Schedule): string {
 		return 'Not armed';
 	}
 
-	const diff = schedule.next_run - Date.now();
+	// The server tells the moment in seconds.
+	const diff = schedule.next_run - Date.now() / 1000;
 
-	return diff <= 60_000 ? 'Due now' : `in ${inWords(diff / 1000)}`;
+	return diff <= 60 ? 'Due now' : `in ${inWords(diff)}`;
 }
 
 /** Skippable plain-language warnings about the schedule's cron health. */
@@ -360,19 +366,19 @@ function scheduleWarning(schedule: Schedule): string {
 		return '';
 	}
 
-	const now = Date.now();
+	const now = Date.now() / 1000;
 
 	if (!schedule.next_run) {
 		return 'No run is queued — save the schedule again (or press Run now) to arm it.';
 	}
 
 	if (schedule.next_run < now) {
-		return `Was due ${inWords((now - schedule.next_run) / 1000)} ago — cron fires when someone visits the site, so quiet sites run late.`;
+		return `Was due ${inWords(now - schedule.next_run)} ago — cron fires when someone visits the site, so quiet sites run late.`;
 	}
 
 	if (
 		schedule.last_run &&
-		now / 1000 - schedule.last_run > intervalSeconds(schedule.interval) * 1.5 + 7200
+		now - schedule.last_run > intervalSeconds(schedule.interval) * 1.5 + 7200
 	) {
 		return `Last ran ${formatDate(schedule.last_run)} — that is more than one full ${friendlyInterval(schedule.interval).toLowerCase()} cycle ago; the schedule may not be firing.`;
 	}

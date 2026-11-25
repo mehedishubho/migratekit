@@ -102,6 +102,18 @@ try {
 
 check_mio('connection test passes', ! $threw);
 
+// The test opens a multipart upload on a probe key and cancels it.
+$pending = request_mio('GET', $base, array( 'uploads' => '' ));
+check_mio('connection test leaves no open upload behind', $pending['status'] === 200 && strpos($pending['body'], 'migratekit-write-check.wpress') === false);
+
+// An upload abandoned after a part, the way a push that was stopped leaves one, is discarded on the storage.
+$session = $provider->upload_start('minio-abandoned.wpress');
+$provider->upload_chunk($session, $local, 0, $provider->chunk_size());
+$provider->upload_abort($session);
+
+$pending = request_mio('GET', $base, array( 'uploads' => '' ));
+check_mio('an abandoned upload is discarded on the storage', $pending['status'] === 200 && strpos($pending['body'], 'minio-abandoned.wpress') === false);
+
 $session = $provider->upload_start('minio-trip.wpress');
 $total   = 0;
 

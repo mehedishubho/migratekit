@@ -12,6 +12,7 @@ namespace MigrateKit\Http;
 use MigrateKit\Archive\Inspector;
 use MigrateKit\Archive\Reader;
 use MigrateKit\Cloud\Manager;
+use MigrateKit\Job\ActiveJobs;
 use MigrateKit\Job\Runner;
 use MigrateKit\Scheduler\Cron;
 use MigrateKit\Scheduler\Schedule;
@@ -32,6 +33,7 @@ final class AjaxController {
 			'migratekit_import_step'   => 'import_step',
 			'migratekit_import_chunk'  => 'import_chunk',
 			'migratekit_status'        => 'status',
+			'migratekit_jobs_active'   => 'jobs_active',
 			'migratekit_job_cancel'    => 'job_cancel',
 			'migratekit_backups_list'  => 'backups_list',
 			'migratekit_backup_delete' => 'backup_delete',
@@ -68,7 +70,7 @@ final class AjaxController {
 		self::guard(Capabilities::EXPORT);
 
 		try {
-			wp_send_json_success(Runner::start_export(Options::export($_POST)));
+			wp_send_json_success(self::tracked(Runner::start_export(Options::export($_POST))));
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 500);
 		}
@@ -111,7 +113,7 @@ final class AjaxController {
 		$name = isset($file['name']) ? sanitize_file_name((string) $file['name']) : 'upload.wpress';
 
 		try {
-			wp_send_json_success(Runner::start_import($tmp, $name, Options::import($_POST)));
+			wp_send_json_success(self::tracked(Runner::start_import($tmp, $name, Options::import($_POST))));
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 500);
 		}
@@ -136,7 +138,11 @@ final class AjaxController {
 
 		try {
 			if ($phase === 'start') {
-				wp_send_json_success(Runner::create_import_job(Options::import($_POST)));
+				// The name and size let a reloaded page recognise the same file and continue the upload.
+				$name = isset($_POST['name']) ? sanitize_file_name((string) wp_unslash($_POST['name'])) : '';
+				$size = isset($_POST['size']) ? max(0, (int) $_POST['size']) : 0;
+
+				wp_send_json_success(self::tracked(Runner::create_import_job(Options::import($_POST), $name, $size)));
 			}
 
 			if ($phase === 'append') {
@@ -271,21 +277,25 @@ final class AjaxController {
 	}
 
 	/**
-	 * Start an import job from a backup stored on this server.
+	 * Start an import job from a backup stored on this server. With `cloud`, a
+	 * known provider's id, the job says the backup was fetched from there.
 	 *
 	 * @return void
 	 */
 	public static function backup_restore(): void {
 		self::guard(Capabilities::IMPORT);
 
-		$name = basename((string) wp_unslash((string) ( $_POST['name'] ?? '' )));
+		$name  = basename((string) wp_unslash((string) ( $_POST['name'] ?? '' )));
+		$cloud = isset($_POST['cloud']) ? sanitize_key((string) wp_unslash($_POST['cloud'])) : '';
 
 		if (! BackupsRepository::validate_name($name)) {
 			wp_send_json_error(array( 'message' => 'Invalid backup name.' ), 400);
 		}
 
 		try {
-			wp_send_json_success(Runner::start_restore($name, Options::import($_POST)));
+			$context = Manager::provider($cloud) === null ? array() : array( 'cloud' => $cloud );
+
+			wp_send_json_success(self::tracked(Runner::start_restore($name, Options::import($_POST), $context)));
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 400);
 		}
@@ -653,13 +663,16 @@ final class AjaxController {
 		$name     = isset($_POST['name']) ? basename((string) wp_unslash($_POST['name'])) : '';
 
 		try {
-			wp_send_json_success(Runner::start_push($name, $provider));
+			wp_send_json_success(self::tracked(Runner::start_push($name, $provider)));
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 400);
 		}
 	}
 
 	/**
+	 * With `restore`, the backup is restored on this site as soon as it has
+	 * arrived; the reply's final step then names the restore job.
+	 *
 	 * @return void
 	 */
 	public static function cloud_pull(): void {
@@ -667,12 +680,65 @@ final class AjaxController {
 
 		$provider = self::cloud_provider_id();
 		$remote   = isset($_POST['remote']) ? basename((string) wp_unslash($_POST['remote'])) : '';
+		$restore  = ! empty($_POST['restore']);
 
 		try {
-			wp_send_json_success(Runner::start_pull($provider, $remote));
+			wp_send_json_success(
+				self::tracked(
+					Runner::start_pull($provider, $remote, $restore, $restore ? Options::import($_POST) : array())
+				)
+			);
 		} catch (\Throwable $e) {
 			wp_send_json_error(array( 'message' => $e->getMessage() ), 400);
 		}
+	}
+
+	/**
+	 * Jobs the admin pages started and have not finished, so a reloaded page can continue them.
+	 *
+	 * @return void
+	 */
+	public static function jobs_active(): void {
+		if (! self::authorize()) {
+			wp_send_json_error(array( 'message' => 'You do not have permission to do that.' ), 403);
+		}
+
+		$caps = array(
+			Runner::EXPORT => Capabilities::EXPORT,
+			Runner::IMPORT => Capabilities::IMPORT,
+			Runner::RESET  => Capabilities::RESET,
+			Runner::PUSH   => Capabilities::EXPORT,
+			Runner::PULL   => Capabilities::IMPORT,
+		);
+
+		$jobs = array();
+
+		foreach (Runner::open_jobs() as $job) {
+			$capability = isset($caps[ $job['type'] ]) ? $caps[ $job['type'] ] : null;
+
+			// A page may only continue what its user is allowed to do.
+			if (self::nonce_ok() && $capability !== null && ! current_user_can($capability)) {
+				continue;
+			}
+
+			$jobs[] = $job;
+		}
+
+		wp_send_json_success(array( 'jobs' => $jobs ));
+	}
+
+	/**
+	 * List a freshly started job, so a reloaded page finds and continues it.
+	 *
+	 * @param array $state Job the Runner just started.
+	 * @return array The same state.
+	 */
+	private static function tracked(array $state): array {
+		if (! empty($state['id'])) {
+			ActiveJobs::add((string) $state['id']);
+		}
+
+		return $state;
 	}
 
 	/**

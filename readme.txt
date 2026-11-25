@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.13
+Stable tag: 0.0.14
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -64,6 +64,16 @@ PHP 7.4 or newer (8.2+ recommended) with the standard `openssl`, `zlib` and `bzi
 Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus `cloud list|test|files|push|pull`, including the full export option set as command flags.
 
 == Changelog ==
+
+= 0.0.14 =
+* Backups, restores and cloud transfers keep going after the page is reloaded: the same progress bar is still there and carries on from where it was, on whichever MigrateKit page you open.
+* Moving to another MigrateKit page keeps the work going without asking; reloading or leaving with work under way asks first.
+* Work left behind — a closed tab, a job stopped elsewhere, a job that waited for hours — is listed under "Unfinished tasks", with Resume or with the reason it stopped.
+* Cloud storage: every backup on the connected storage has a Restore button, which fetches it and restores it in one go.
+* An encrypted backup asks for its password when it is restored, from the Cloud page as from Backups — and a wrong password is asked again instead of failing.
+* Stop works the moment a job has been started, before the server has answered.
+* Schedules and the dashboard now show when the next backup is really due, instead of "due now" with a warning that it was overdue.
+* Cloud storage: the S3 connection test now checks that the key can upload, not only list, so a read-only key is reported before a backup push fails — and a 403 names the permission to fix (on Cloudflare R2: "Object Read and Write").
 
 = 0.0.13 =
 * Large sites no longer stall: file listing, the database dump, packing and the final checksum all run in small resumable slices instead of one long request.

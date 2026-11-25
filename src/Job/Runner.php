@@ -39,6 +39,20 @@ final class Runner {
 	private const LOCK_WAIT = 2.0;
 
 	/**
+	 * Seconds after which an unfinished job is reported as left behind, so a
+	 * page load waits for an explicit resume instead of continuing it on sight.
+	 *
+	 * A job that was idle for days should not start rewriting a site again unasked; a job paused overnight should simply carry on.
+	 */
+	public const STALE_AFTER = 43200;
+
+	/**
+	 * The same for a job that replaces the site. A reloaded page carries such a
+	 * job on at once, but one that was walked away from is only ever resumed on request.
+	 */
+	public const RESTORE_STALE_AFTER = 1800;
+
+	/**
 	 * @param string $type Job type constant.
 	 * @return int Stage count for the type.
 	 */
@@ -144,6 +158,7 @@ final class Runner {
 			'archive_path'  => $archive,
 			'storage_dir'   => $storage,
 			'final_name'    => basename($original_name),
+			'source'        => 'upload',
 			'options'       => $options,
 			'stage'         => 0,
 			'percent'       => 0,
@@ -163,6 +178,9 @@ final class Runner {
 	 * @return array Public job state.
 	 */
 	public static function advance(string $job_id): array {
+		// A page that reloads or closes drops its connection. The work already in flight should still reach its next saved point.
+		ignore_user_abort(true);
+
 		$state = self::read_fresh($job_id);
 
 		if ($state === array()) {
@@ -177,7 +195,7 @@ final class Runner {
 		$lock = self::lock($state);
 
 		if ($lock === null) {
-			return self::status($job_id);
+			return array_merge(self::status($job_id), array( 'busy' => true ));
 		}
 
 		try {
@@ -188,9 +206,37 @@ final class Runner {
 			}
 
 			return self::step($job_id, $latest);
+		} catch (\Throwable $e) {
+			self::record_failure($job_id, $e);
+
+			throw $e;
 		} finally {
 			self::unlock($lock);
 		}
+	}
+
+	/**
+	 * Keep why the last step failed on the job itself. A page that loads later
+	 * finds the job waiting either way; this is what tells "waiting" from "gave up",
+	 * so a restore that failed is not simply run again on sight.
+	 *
+	 * @param string     $job_id Job identifier.
+	 * @param \Throwable $error  What the step ended with.
+	 * @return void
+	 */
+	private static function record_failure(string $job_id, \Throwable $error): void {
+		$saved = self::read_fresh($job_id);
+
+		if ($saved === array()) {
+			return;
+		}
+
+		// An engine failure (out of memory, a missing class) describes server paths; that belongs in the log, not on the job.
+		$saved['error'] = $error instanceof \Exception
+			? $error->getMessage()
+			: 'The server stopped this step with an internal error.';
+
+		Status::write($job_id, $saved);
 	}
 
 	/**
@@ -201,6 +247,7 @@ final class Runner {
 	 * @return array Public job state.
 	 */
 	private static function step(string $job_id, array $state): array {
+		$before = $state;
 		$type   = isset($state['type']) ? (string) $state['type'] : self::EXPORT;
 		$status = static function (string $message, ?int $percent = null) use (&$state): void {
 			$state['message'] = $message;
@@ -224,6 +271,8 @@ final class Runner {
 			Maintenance::start();
 		}
 
+		$tracked = ActiveJobs::has($job_id);
+
 		if ($type === self::EXPORT) {
 			self::assert_resumable($state);
 			self::discard_dump($state);
@@ -238,10 +287,53 @@ final class Runner {
 
 		$factory  = self::pipeline_factory($type);
 		$pipeline = $factory();
-		$done     = $pipeline->advance($state, $context);
+
+		try {
+			$done = $pipeline->advance($state, $context);
+		} catch (\Throwable $e) {
+			if (self::cancelled_while_running($job_id, $before, $state)) {
+				return self::abandoned($state, $type, $pipeline->stage_count());
+			}
+
+			// The import has just replaced the table that held the job's record. It is written again, so the job stays known and can be carried on.
+			if (self::took_its_record($before, $state)) {
+				Status::write($job_id, $state);
+			}
+
+			throw $e;
+		}
+
+		// The job was cancelled while this step ran: its progress must not bring it back.
+		if (self::cancelled_while_running($job_id, $before, $state)) {
+			return self::abandoned($state, $type, $pipeline->stage_count());
+		}
+
+		unset($state['error']);
 
 		if ($done && $type === self::EXPORT) {
 			self::publish_export($state);
+		}
+
+		if ($done && $type === self::PULL && ! empty($state['restore'])) {
+			// The backup has arrived: the restore it was asked for gets a job of its own, so it can be picked up like any other.
+			$restore_id = (string) ( $state['restore_job'] ?? '' );
+
+			if ($restore_id === '') {
+				$restore_id           = JobId::generate();
+				$state['restore_job'] = $restore_id;
+
+				// Saved before the job exists, so a request cut off from here on completes the same restore instead of adding a second one.
+				Status::write($job_id, $state);
+			}
+
+			if (Status::read($restore_id) === array()) {
+				self::start_restore(
+					(string) $state['remote'],
+					isset($state['restore_options']) && is_array($state['restore_options']) ? $state['restore_options'] : array(),
+					array( 'cloud' => (string) ( $state['cloud'] ?? '' ), 'tracked' => ActiveJobs::has($job_id) ),
+					$restore_id
+				);
+			}
 		}
 
 		if ($done) {
@@ -262,11 +354,71 @@ final class Runner {
 		}
 
 		// Once the step that packed the dump has been saved, its loose copy is only using disk space.
-		if (Status::write($job_id, $state) && $type === self::EXPORT) {
+		$saved = Status::write($job_id, $state);
+
+		if ($type === self::IMPORT && ! empty($state['replaced_options'])) {
+			// The backup's options have replaced this site's, the registry with them. What the backup knew about jobs belongs to the site it was taken on, so only this job is put back, until it is done.
+			ActiveJobs::replace($done || ! $tracked ? array() : array( $job_id ));
+		} elseif ($done) {
+			ActiveJobs::remove($job_id);
+		}
+
+		if ($saved && $type === self::EXPORT) {
 			self::discard_dump($state);
 		}
 
 		return self::public_state($state, $done, $pipeline->stage_count());
+	}
+
+	/**
+	 * Whether this step of an import replaced the options table, and with it
+	 * the job's own record: the backup's options are the site's from then on.
+	 *
+	 * @param array $before Job state as the step began.
+	 * @param array $state  Job state as the step leaves it.
+	 * @return bool
+	 */
+	private static function took_its_record(array $before, array $state): bool {
+		return empty($before['replaced_options']) && ! empty($state['replaced_options']);
+	}
+
+	/**
+	 * Whether the job was cancelled while a step of it ran. The job's record is
+	 * the witness, except where that step took the record itself: a missing
+	 * record means nothing there, so the job's working folder stands in, since
+	 * cancelling removes that.
+	 *
+	 * @param string $job_id Job identifier.
+	 * @param array  $before Job state as the step began.
+	 * @param array  $state  Job state as the step leaves it.
+	 * @return bool
+	 */
+	private static function cancelled_while_running(string $job_id, array $before, array $state): bool {
+		if (self::took_its_record($before, $state)) {
+			return ! is_dir((string) ( $state['storage_dir'] ?? '' ));
+		}
+
+		return Status::read($job_id) === array();
+	}
+
+	/**
+	 * The reply for a step whose job was cancelled while it ran: nothing of
+	 * the step is kept, and an upload it opened meanwhile is discarded.
+	 *
+	 * @param array  $state  Job state as this step knew it.
+	 * @param string $type   Job type constant.
+	 * @param int    $stages Stage count of the pipeline.
+	 * @return array Public job state.
+	 */
+	private static function abandoned(array $state, string $type, int $stages): array {
+		if ($type === self::PUSH) {
+			self::discard_upload($state);
+		}
+
+		$state['message'] = 'Cancelled';
+		$state['percent'] = 0;
+
+		return array_merge(self::public_state($state, false, $stages), array( 'done' => true, 'cancelled' => true ));
 	}
 
 	/**
@@ -293,9 +445,17 @@ final class Runner {
 	 * @return float
 	 */
 	private static function time_budget(): float {
-		$limit = (int) @ini_get('max_execution_time');
+		$limit  = (int) @ini_get('max_execution_time');
+		$budget = $limit <= 0 ? self::STEP_SECONDS : max(1.0, min(self::STEP_SECONDS, $limit * 0.5));
 
-		return $limit <= 0 ? self::STEP_SECONDS : max(1.0, min(self::STEP_SECONDS, $limit * 0.5));
+		/**
+		 * Seconds of work a step may take before the job yields to the next request.
+		 *
+		 * @param float $budget The standard slice.
+		 */
+		$budget = (float) apply_filters('migratekit_step_seconds', $budget);
+
+		return max(0.001, $budget);
 	}
 
 	/**
@@ -386,26 +546,30 @@ final class Runner {
 	/**
 	 * Reserve an import job before its archive is uploaded.
 	 *
-	 * @param array $options Import options.
+	 * @param array  $options Import options.
+	 * @param string $name    File name the browser will upload.
+	 * @param int    $size    Size it announces for that file, 0 when unknown.
 	 * @return array Public job state.
 	 */
-	public static function create_import_job(array $options = array()): array {
+	public static function create_import_job(array $options = array(), string $name = '', int $size = 0): array {
 		$id      = JobId::generate();
 		$storage = self::storage_dir($id);
 
 		$state = array(
-			'id'           => $id,
-			'type'         => self::IMPORT,
-			'archive_path' => $storage . DIRECTORY_SEPARATOR . 'upload.wpress',
-			'storage_dir'  => $storage,
-			'final_name'   => '',
-			'options'      => $options,
-			'stage'        => 0,
-			'percent'      => 0,
-			'message'      => 'Waiting for upload',
-			'created'      => time(),
-			'received'     => 0,
-			'uploaded'     => false,
+			'id'            => $id,
+			'type'          => self::IMPORT,
+			'archive_path'  => $storage . DIRECTORY_SEPARATOR . 'upload.wpress',
+			'storage_dir'   => $storage,
+			'final_name'    => $name !== '' ? basename($name) : '',
+			'source'        => 'upload',
+			'options'       => $options,
+			'stage'         => 0,
+			'percent'       => 0,
+			'message'       => 'Waiting for upload',
+			'created'       => time(),
+			'received'      => 0,
+			'expected_size' => max(0, $size),
+			'uploaded'      => false,
 		);
 
 		Status::write($id, $state);
@@ -595,9 +759,11 @@ final class Runner {
 	 *
 	 * @param string $backup_name Backup file name.
 	 * @param array  $options     Import options.
+	 * @param array  $context     'source' names where the archive came from ('backup', 'cloud'); 'tracked' lists the job for the admin pages.
+	 * @param string $job_id      Identifier to give the job, when it was reserved by the job that fetched the archive.
 	 * @return array Public job state.
 	 */
-	public static function start_restore(string $backup_name, array $options = array()): array {
+	public static function start_restore(string $backup_name, array $options = array(), array $context = array(), string $job_id = ''): array {
 		$repository = new BackupsRepository();
 		$backup     = $repository->find($backup_name);
 
@@ -605,13 +771,17 @@ final class Runner {
 			throw new \RuntimeException('Backup not found.');
 		}
 
-		$id      = JobId::generate();
+		$id      = JobId::is_valid($job_id) ? $job_id : JobId::generate();
 		$storage = self::storage_dir($id);
 		$archive = $storage . DIRECTORY_SEPARATOR . 'upload.wpress';
 
-		if (! @copy($backup['path'], $archive)) {
+		// A second name for the same file beats a copy of it wherever the file system allows; the archive is only ever read here.
+		if ( ! @link($backup['path'], $archive) && ! @copy($backup['path'], $archive)) {
 			throw new \RuntimeException('Unable to read the backup for restore.');
 		}
+
+		$tracked = ! empty($context['tracked']);
+		$cloud   = isset($context['cloud']) ? (string) $context['cloud'] : '';
 
 		$state = array(
 			'id'           => $id,
@@ -619,6 +789,9 @@ final class Runner {
 			'archive_path' => $archive,
 			'storage_dir'  => $storage,
 			'final_name'   => $backup_name,
+			'source'       => $cloud !== '' ? 'cloud' : 'backup',
+			'cloud'        => $cloud,
+			'remote'       => $cloud !== '' ? $backup_name : '',
 			'options'      => $options,
 			'stage'        => 0,
 			'percent'      => 0,
@@ -628,6 +801,10 @@ final class Runner {
 		);
 
 		Status::write($id, $state);
+
+		if ($tracked) {
+			ActiveJobs::add($id);
+		}
 
 		return self::public_state($state, false, self::stages_for(self::IMPORT));
 	}
@@ -714,11 +891,13 @@ final class Runner {
 	/**
 	 * Pull a remote backup from a cloud provider into the backups directory.
 	 *
-	 * @param string $provider_id Cloud provider id.
-	 * @param string $remote_name Remote file name.
+	 * @param string $provider_id     Cloud provider id.
+	 * @param string $remote_name     Remote file name.
+	 * @param bool   $restore         Whether the backup is restored on this site once it has arrived.
+	 * @param array  $restore_options Import options for that restore.
 	 * @return array Public job state.
 	 */
-	public static function start_pull(string $provider_id, string $remote_name): array {
+	public static function start_pull(string $provider_id, string $remote_name, bool $restore = false, array $restore_options = array()): array {
 		if (! Manager::valid_remote($remote_name)) {
 			throw new \RuntimeException('Invalid remote backup name.');
 		}
@@ -737,17 +916,19 @@ final class Runner {
 		$storage = self::storage_dir($id);
 
 		$state = array(
-			'id'          => $id,
-			'type'        => self::PULL,
-			'storage_dir' => $storage,
-			'cloud'       => $provider_id,
-			'remote'      => $remote_name,
-			'size'        => 0,
-			'options'     => array(),
-			'stage'       => 0,
-			'percent'     => 0,
-			'message'     => 'Pull queued',
-			'created'     => time(),
+			'id'              => $id,
+			'type'            => self::PULL,
+			'storage_dir'     => $storage,
+			'cloud'           => $provider_id,
+			'remote'          => $remote_name,
+			'size'            => 0,
+			'options'         => array(),
+			'stage'           => 0,
+			'percent'         => 0,
+			'message'         => 'Pull queued',
+			'created'         => time(),
+			'restore'         => $restore,
+			'restore_options' => $restore ? $restore_options : array(),
 		);
 
 		Status::write($id, $state);
@@ -762,7 +943,19 @@ final class Runner {
 	 * @return void
 	 */
 	public static function cancel(string $job_id): void {
+		ActiveJobs::remove($job_id);
+
 		$state = Status::read($job_id);
+
+		if ($state !== array()) {
+			// A step still running would save its progress over the cancellation, so give it a moment to end first.
+			self::unlock(self::lock($state));
+			$state = Status::read($job_id);
+
+			if (( $state['type'] ?? '' ) === self::PUSH && empty($state['done'])) {
+				self::discard_upload($state);
+			}
+		}
 
 		if ($state !== array()) {
 			$storage = isset($state['storage_dir']) ? (string) $state['storage_dir'] : '';
@@ -777,6 +970,61 @@ final class Runner {
 		}
 
 		Status::delete($job_id);
+	}
+
+	/**
+	 * Free what an abandoned push already put on the remote, which a listing there does not show.
+	 *
+	 * @param array $state Job state as stored.
+	 * @return void
+	 */
+	private static function discard_upload(array $state): void {
+		if (empty($state['session']) || ! is_array($state['session'])) {
+			return;
+		}
+
+		$provider = Manager::provider((string) ( $state['cloud'] ?? '' ));
+
+		if ($provider === null) {
+			return;
+		}
+
+		try {
+			$provider->upload_abort($state['session']);
+		} catch (\Throwable $e) {
+			// Storage on the remote is all that is at stake, and the provider may keep it until its own expiry.
+		}
+	}
+
+	/**
+	 * Jobs the admin pages have not finished, oldest first. Entries whose job
+	 * is missing or finished are dropped.
+	 *
+	 * @return array[] Public job states, each with a `stale` flag.
+	 */
+	public static function open_jobs(): array {
+		$open = array();
+		$now  = time();
+
+		foreach (ActiveJobs::ids() as $id) {
+			$state = Status::read($id);
+
+			if ($state === array() || ! empty($state['done'])) {
+				ActiveJobs::remove($id);
+				continue;
+			}
+
+			$type    = isset($state['type']) ? (string) $state['type'] : self::EXPORT;
+			$public  = self::public_state($state, false, self::stages_for($type));
+			$touched = (int) ( $state['updated'] ?? ( $state['created'] ?? $now ) );
+			$limit   = $type === self::IMPORT ? self::RESTORE_STALE_AFTER : self::STALE_AFTER;
+
+			$public['stale'] = ( $now - $touched ) > $limit;
+
+			$open[] = $public;
+		}
+
+		return $open;
 	}
 
 	/**
@@ -848,6 +1096,19 @@ final class Runner {
 			$percent = 100;
 		}
 
+		$label  = '';
+		$origin = isset($state['source']) ? (string) $state['source'] : '';
+
+		if (! empty($state['cloud'])) {
+			$provider = Manager::provider((string) $state['cloud']);
+			$label    = $provider === null ? '' : $provider->label();
+		}
+
+		// A push keeps the path of the file it sends; only where an archive came from is anyone's business outside the job.
+		if ( ! in_array($origin, array( 'upload', 'backup', 'cloud' ), true )) {
+			$origin = '';
+		}
+
 		return array(
 			'id'          => isset($state['id']) ? (string) $state['id'] : '',
 			'type'        => isset($state['type']) ? (string) $state['type'] : '',
@@ -860,7 +1121,17 @@ final class Runner {
 			'received'    => isset($state['received']) ? (int) $state['received'] : 0,
 			'archiveName' => isset($state['archive_path']) ? basename((string) $state['archive_path']) : '',
 			'cloud'       => isset($state['cloud']) ? (string) $state['cloud'] : '',
+			'cloudLabel'  => $label,
 			'remote'      => isset($state['remote']) ? (string) $state['remote'] : '',
+			'backupName'  => isset($state['final_name']) ? (string) $state['final_name'] : '',
+			'source'      => $origin,
+			'restore'     => ! empty($state['restore']),
+			'restoreJob'  => isset($state['restore_job']) ? (string) $state['restore_job'] : '',
+			'total'       => isset($state['expected_size']) ? (int) $state['expected_size'] : 0,
+			// The time of the last change kept by the server; a job that has just been made has only its creation so far.
+			'updatedAt'   => isset($state['updated']) ? (int) $state['updated'] : (int) ( $state['created'] ?? 0 ),
+			'error'       => isset($state['error']) && is_string($state['error']) ? $state['error'] : '',
+			'busy'        => false,
 		);
 	}
 

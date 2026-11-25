@@ -11,6 +11,7 @@ namespace MigrateKit\Cloud\Stages;
 
 use MigrateKit\Pipeline\PipelineContext;
 use MigrateKit\Pipeline\StageInterface;
+use MigrateKit\Support\Bytes;
 
 final class PullTransferStage implements StageInterface {
 
@@ -38,21 +39,33 @@ final class PullTransferStage implements StageInterface {
 		$offset  = isset($state['offset']) ? (int) $state['offset'] : 0;
 		$size    = (int) ( $state['size'] ?? 0 );
 
-		if ($offset === 0 && is_file($target)) {
-			@unlink($target);
-		}
-
-		$handle = fopen($target, $offset === 0 ? 'wb' : 'ab');
+		$handle = fopen($target, 'c');
 
 		if ($handle === false) {
 			throw new \RuntimeException('The pull destination could not be opened for writing.');
 		}
 
-		$chunk    = $provider->chunk_size();
-		$deadline = $ctx->deadline();
-		$label    = $provider->label();
-
 		try {
+			clearstatcache(true, $target);
+
+			// The bytes already downloaded are gone: fill the gap with a fresh download rather than with the wrong ones.
+			if ($offset > 0 && (int) @filesize($target) < $offset) {
+				$offset            = 0;
+				$state['offset']   = 0;
+				$state['percent']  = 0;
+
+				$ctx->report(sprintf('The partially downloaded %s is no longer on this server — downloading it again from the start.', $remote), 0);
+			}
+
+			// A request that was cut off after writing more than the job saved leaves the file longer than the offset resumes from.
+			if (! ftruncate($handle, $offset) || fseek($handle, $offset) !== 0) {
+				throw new \RuntimeException('The pull destination could not be prepared for writing.');
+			}
+
+			$chunk    = $provider->chunk_size();
+			$deadline = $ctx->deadline();
+			$label    = $provider->label();
+
 			while (true) {
 				$part = $provider->download_chunk($session, $offset, $chunk);
 
@@ -76,7 +89,7 @@ final class PullTransferStage implements StageInterface {
 						$percent
 					);
 				} else {
-					$ctx->report(sprintf('Downloaded %s from %s (%d bytes so far)', $remote, $label, $offset));
+					$ctx->report(sprintf('Downloaded %s from %s (%s so far)', $remote, $label, Bytes::format($offset)));
 				}
 
 				if ($deadline !== null && microtime(true) >= $deadline) {
@@ -85,6 +98,18 @@ final class PullTransferStage implements StageInterface {
 			}
 		} finally {
 			fclose($handle);
+		}
+
+		// An archive that is shorter than the remote announced would fail its integrity check later, or restore a truncated site.
+		if ($size > 0 && $offset < $size) {
+			throw new \RuntimeException(
+				sprintf(
+					'The download of %s stopped early (%s of %s). Start it again.',
+					$remote,
+					Bytes::format($offset),
+					Bytes::format($size)
+				)
+			);
 		}
 
 		$state['offset'] = $offset;

@@ -24,6 +24,8 @@ final class Status {
 	 * @return bool False when the state could not be stored.
 	 */
 	public static function write(string $job_id, array $state): bool {
+		$state['updated'] = time();
+
 		return OptionStore::put(self::OPTION_PREFIX . $job_id, $state);
 	}
 

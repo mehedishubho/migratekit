@@ -328,16 +328,24 @@ final class DriveProvider implements CloudProviderInterface {
 		);
 
 		if ($response['status'] === 308) {
-			$session['offset'] = (int) ( $session['offset'] ?? 0 ) + strlen($chunk);
+			// Drive reports how much it holds. After a request that was cut off before the job saved, that is ahead of the job.
+			$session['size']   = $total;
+			$session['offset'] = self::held_through($response) ?? ( (int) ( $session['offset'] ?? 0 ) + strlen($chunk) );
 
 			return strlen($chunk);
 		}
 
 		if ($response['status'] === 200 || $response['status'] === 201) {
+			$session['size']   = $total;
 			$session['offset'] = $total;
 			$session['done']   = true;
 
 			return strlen($chunk);
+		}
+
+		// Drive's rule for a resumable upload: a 4xx (other than the token expiry handled above) means the session is gone, typically after its week of life.
+		if ($response['status'] >= 400 && $response['status'] < 500 && $response['status'] !== 429) {
+			throw new SessionLostException('The Google Drive upload session is no longer valid.');
 		}
 
 		throw new \RuntimeException($this->message('Uploading a Google Drive chunk failed', $response));
@@ -348,9 +356,39 @@ final class DriveProvider implements CloudProviderInterface {
 			return;
 		}
 
-		// The resumable upload finalises on the last chunk (2xx); a replayed
-		// finish means the session state says chunks are pending.
-		throw new \RuntimeException('The Google Drive upload is not complete. Push the backup again.');
+		// The resumable upload ends on the reply to its last chunk. A request cut off before the job saved never saw that reply, so ask the session.
+		$total = (int) ( $session['size'] ?? 0 );
+
+		if ($total > 0) {
+			$response = $this->api(
+				(string) $session['upload_url'],
+				'PUT',
+				array( 'Content-Range' => 'bytes */' . $total ),
+				''
+			);
+
+			if ($response['status'] >= 200 && $response['status'] < 300) {
+				$session['offset'] = $total;
+				$session['done']   = true;
+
+				return;
+			}
+
+			// Still short of the end, or the session is gone: the upload has to be made again.
+			if ($response['status'] === 308 || ( $response['status'] >= 400 && $response['status'] < 500 && $response['status'] !== 429 ) ) {
+				throw new SessionLostException('The Google Drive upload is not complete.');
+			}
+
+			throw new \RuntimeException($this->message('Checking the Google Drive upload failed', $response));
+		}
+
+		throw new SessionLostException('The Google Drive upload is not complete.');
+	}
+
+	/**
+	 * Drive drops an unused resumable session by itself after about a week.
+	 */
+	public function upload_abort(array $session): void {
 	}
 
 	public function download_start(string $remote, int $size = 0): array {
@@ -510,6 +548,18 @@ final class DriveProvider implements CloudProviderInterface {
 		}
 
 		return array( 'id' => '', 'size' => 0 );
+	}
+
+	/**
+	 * Bytes Drive reports holding, from the Range header of an incomplete reply.
+	 *
+	 * @param array{status:int,headers:array<string,string>,body:string,error:string} $response Transport response.
+	 * @return int|null
+	 */
+	private static function held_through(array $response): ?int {
+		$range = trim((string) ( $response['headers']['range'] ?? '' ));
+
+		return preg_match('/^bytes=0-(\d+)$/', $range, $match) === 1 ? ( (int) $match[1] ) + 1 : null;
 	}
 
 	/**

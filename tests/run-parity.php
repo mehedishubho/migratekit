@@ -25,8 +25,10 @@ use MigrateKit\Export\Manifest;
 use MigrateKit\Export\Stages\EnumerateFilesStage;
 use MigrateKit\Http\Options;
 use MigrateKit\Import\Stages\DatabaseStage as ImportDatabaseStage;
+use MigrateKit\Job\ActiveJobs;
 use MigrateKit\Job\JobId;
 use MigrateKit\Job\Runner;
+use MigrateKit\Job\Status;
 use MigrateKit\Pipeline\PipelineContext;
 use MigrateKit\Scheduler\Cron;
 use MigrateKit\Site\SiteContext;
@@ -61,11 +63,29 @@ function same_pw(string $label, $expected, $actual): void {
 	}
 }
 
-/** Minimal WP shim for the Runner's storage dir mkdir. */
+/** Minimal WP shims for the Runner's storage dir mkdir and for options, which the cloud settings read directly. */
 if (! function_exists('wp_mkdir_p')) {
 	function wp_mkdir_p(string $dir): bool {
 		return is_dir($dir) || mkdir($dir, 0777, true);
 	}
+}
+
+$GLOBALS['pw_opt'] = array();
+
+function get_option(string $name, $default = false) {
+	return array_key_exists($name, $GLOBALS['pw_opt']) ? $GLOBALS['pw_opt'][ $name ] : $default;
+}
+
+function update_option(string $name, $value, $autoload = null): bool {
+	$GLOBALS['pw_opt'][ $name ] = $value;
+
+	return true;
+}
+
+function delete_option(string $name): bool {
+	unset($GLOBALS['pw_opt'][ $name ]);
+
+	return true;
 }
 
 $tmp    = sys_get_temp_dir() . '/mk-parity-' . bin2hex(random_bytes(4));
@@ -511,6 +531,120 @@ check_pw('flag expires after the TTL', Maintenance::expired(time() + Maintenance
 Maintenance::stop();
 check_pw('maintenance turns off when the job finishes', Maintenance::is_on() === false);
 check_pw('expired reads as true after stop', Maintenance::expired());
+
+// ---------------------------------------------------------------------------
+echo "\n[11] Jobs outlive the page that started them\n";
+
+same_pw('the registry starts empty', array(), ActiveJobs::ids());
+
+ActiveJobs::add('job-one');
+ActiveJobs::add('job-two');
+ActiveJobs::add('job-one');
+
+same_pw('a job is listed once, oldest first', array( 'job-one', 'job-two' ), ActiveJobs::ids());
+check_pw('a listed job is found', ActiveJobs::has('job-two'));
+check_pw('an unlisted job is not found', ! ActiveJobs::has('job-three'));
+check_pw('an empty id is never a listed job', ! ActiveJobs::has(''));
+
+ActiveJobs::remove('job-one');
+ActiveJobs::remove('never-listed');
+
+same_pw('a finished job leaves the registry, the rest in order', array( 'job-two' ), ActiveJobs::ids());
+
+OptionStore::put(ActiveJobs::OPTION, array( 'job-two', 'job-two', 7, null, '', 'job-three' ));
+same_pw('a damaged registry reads back as distinct ids', array( 'job-two', 'job-three' ), ActiveJobs::ids());
+
+OptionStore::put(ActiveJobs::OPTION, 'not-a-list');
+same_pw('a registry that is not a list reads as empty', array(), ActiveJobs::ids());
+
+// After an import has replaced the options table, the registry is rebuilt from scratch.
+ActiveJobs::replace(array( 'job-x', 'job-x', '', 5, null, 'job-y' ));
+same_pw('the registry is rebuilt from a list, without repeats or non-ids', array( 'job-x', 'job-y' ), ActiveJobs::ids());
+
+ActiveJobs::replace(array( 'job-two' ));
+same_pw('rebuilding keeps only what it is given', array( 'job-two' ), ActiveJobs::ids());
+
+ActiveJobs::replace(array());
+same_pw('rebuilt from nothing, it is empty', array(), ActiveJobs::ids());
+
+// An upload is reserved with what the browser knows about the file, so a reloaded page can ask for the same file again.
+$named = Runner::create_import_job(array( 'password' => '' ), 'My Site (1).wpress', 123456);
+
+same_pw('the upload keeps the name the browser announced', 'My Site (1).wpress', $named['backupName']);
+same_pw('the upload keeps the size the browser announced', 123456, $named['total']);
+same_pw('an upload says where its archive comes from', 'upload', $named['source']);
+check_pw('a job is stamped with its last change', abs(time() - $named['updatedAt']) < 5);
+check_pw('reserving an upload does not list it by itself', ActiveJobs::ids() === array());
+
+ActiveJobs::add((string) $named['id']);
+Runner::cancel((string) $named['id']);
+
+same_pw('cancelling a job takes it out of the registry', array(), ActiveJobs::ids());
+
+// A restore from the cloud is created under the id the job that fetched the archive reserved for it.
+OptionStore::put('migratekit_backups_path', $archive_dir);
+copy($plain_path, $archive_dir . '/restore-me.wpress');
+
+ActiveJobs::add('fetching-job');
+
+$reserved = JobId::generate();
+$restore  = Runner::start_restore('restore-me.wpress', array(), array( 'cloud' => 's3', 'tracked' => true ), $reserved);
+
+same_pw('the restore takes the id reserved for it', $reserved, $restore['id']);
+same_pw('the restore is listed behind the job that fetched its archive', array( 'fetching-job', $reserved ), ActiveJobs::ids());
+same_pw('the restore says its archive came from the cloud', 'cloud', $restore['source']);
+same_pw('the restore keeps the name of the backup', 'restore-me.wpress', $restore['backupName']);
+same_pw('the restore names the cloud', 's3', $restore['cloud']);
+check_pw('the restore has a label for the cloud', $restore['cloudLabel'] !== '');
+
+$listed = Runner::open_jobs();
+
+same_pw('a job whose record is gone is dropped from the registry', array( $reserved ), ActiveJobs::ids());
+same_pw('one open job is listed', 1, count($listed));
+same_pw('the open job is the restore', $reserved, $listed[0]['id']);
+check_pw('an open job is fresh, and never reported as busy by a page load', $listed[0]['stale'] === false && $listed[0]['busy'] === false);
+same_pw('a job with nothing wrong carries no error', '', $listed[0]['error']);
+
+// Stored as a job last written days ago would be.
+$behind            = Status::read($reserved);
+$behind['updated'] = time() - Runner::STALE_AFTER - 60;
+$behind['error']   = 'The disk is full.';
+
+OptionStore::put(Status::OPTION_PREFIX . $reserved, $behind);
+
+check_pw('a job that waited for days is reported as left behind', Runner::open_jobs()[0]['stale'] === true);
+same_pw('why its last step failed is kept with the job', 'The disk is full.', Runner::open_jobs()[0]['error']);
+
+// A restore is carried on by a page load only while it is still fresh; a backup gets the whole night.
+$behind['updated'] = time() - Runner::RESTORE_STALE_AFTER - 60;
+
+OptionStore::put(Status::OPTION_PREFIX . $reserved, $behind);
+
+check_pw('a restore walked away from for half an hour is left alone', Runner::open_jobs()[0]['stale'] === true);
+
+ActiveJobs::add('night-backup');
+OptionStore::put(Status::OPTION_PREFIX . 'night-backup', array( 'type' => Runner::EXPORT, 'updated' => time() - Runner::RESTORE_STALE_AFTER - 60 ));
+
+check_pw('a backup paused for the evening carries on by itself', Runner::open_jobs()[1]['stale'] === false);
+
+OptionStore::drop(Status::OPTION_PREFIX . 'night-backup');
+
+Runner::cancel($reserved);
+ActiveJobs::remove('night-backup');
+
+same_pw('the registry is empty once more', array(), ActiveJobs::ids());
+check_pw('the cancelled restore has no record left', Status::read($reserved) === array());
+check_pw('the cancelled restore has no working folder left', ! is_dir(Paths::storage() . DIRECTORY_SEPARATOR . $reserved));
+
+$local = Runner::start_restore('restore-me.wpress');
+
+same_pw('a restore from the backups list says so', 'backup', $local['source']);
+check_pw('a restore started on its own is not listed for other pages', ActiveJobs::ids() === array());
+
+Runner::cancel((string) $local['id']);
+
+OptionStore::drop('migratekit_backups_path');
+unlink($archive_dir . '/restore-me.wpress');
 
 // ---------------------------------------------------------------------------
 

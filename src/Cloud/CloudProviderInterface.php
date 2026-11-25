@@ -79,11 +79,17 @@ interface CloudProviderInterface {
 	/**
 	 * Transfer one chunk of a local file into the remote object.
 	 *
+	 * A session that cannot be continued throws SessionLostException. A
+	 * session that carries an 'offset' key states there how many bytes of the
+	 * local file the remote holds, which may be ahead of the job after a
+	 * request was cut off before it saved.
+	 *
 	 * @param array  $session    Session array (by reference).
 	 * @param string $local_path Local source file.
 	 * @param int    $offset     Seek offset in the local file.
 	 * @param int    $length     Number of bytes to send.
-	 * @return int Bytes actually sent (0 signals the transfer must stop).
+	 * @return int Bytes sent (0 signals the transfer must stop, or that the remote already holds this chunk).
+	 * @throws \MigrateKit\Cloud\SessionLostException
 	 */
 	public function upload_chunk(array &$session, string $local_path, int $offset, int $length): int;
 
@@ -94,6 +100,15 @@ interface CloudProviderInterface {
 	 * @return void
 	 */
 	public function upload_finish(array &$session): void;
+
+	/**
+	 * Discard an upload that will not be finished. Nothing to do where the
+	 * remote drops unused sessions by itself.
+	 *
+	 * @param array $session Session array.
+	 * @return void
+	 */
+	public function upload_abort(array $session): void;
 
 	/**
 	 * Start a download session. The returned array must carry 'size' when

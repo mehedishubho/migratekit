@@ -1,22 +1,42 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { config, formatBytes, runJob, uploadImport, type JobState, type UploadProgress } from '../api';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { config, formatBytes } from '../api';
+import JobProgress from '../JobProgress.vue';
+import {
+	continuesUpload,
+	discardSettled,
+	hideInline,
+	isActive,
+	latestJob,
+	pausedUpload,
+	showInline,
+	upload,
+	type TrackedJob,
+} from '../jobs';
 
 const file = ref<File | null>(null);
 const password = ref('');
 const replacing = ref(false);
-const running = ref(false);
-const job = ref<JobState | null>(null);
-const upload = ref<UploadProgress | null>(null);
 const error = ref('');
-const done = ref(false);
+
+/** Set from the click until the first request has been answered, so a second click cannot start another. */
+const starting = ref(false);
+
+/** The upload or import this page shows: the one started here, or the one an earlier visit left unfinished. */
+const job = latestJob('upload', 'import');
+const running = computed(() => starting.value || isActive(job.value));
+const done = computed(() => job.value !== null && job.value.status === 'done');
+
+/** An upload no page can finish by itself: only the browser has the rest of the file. */
+const waiting = computed<TrackedJob | null>(() => pausedUpload());
+
+/** Whether the chosen file is the one the waiting upload was sending. */
+const resumes = computed(() => continuesUpload(waiting.value, file.value));
 
 function choose(event: Event): void {
 	const input = event.target as HTMLInputElement;
+
 	file.value = input.files && input.files.length > 0 ? input.files[0] : null;
-	done.value = false;
-	job.value = null;
-	upload.value = null;
 	error.value = '';
 }
 
@@ -25,7 +45,9 @@ async function start(): Promise<void> {
 		return;
 	}
 
-	if (!file.value) {
+	const chosen = file.value;
+
+	if (!chosen) {
 		error.value = 'Choose a .wpress archive first.';
 		return;
 	}
@@ -34,34 +56,28 @@ async function start(): Promise<void> {
 		return;
 	}
 
-	running.value = true;
 	error.value = '';
-	done.value = false;
-	job.value = null;
-	upload.value = null;
+	starting.value = true;
 
 	try {
-		const first = await uploadImport(file.value, password.value, (progress) => {
-			upload.value = progress;
-		});
+		if (!resumes.value) {
+			// Another file, or a fresh start: whatever an earlier attempt left is of no use.
+			await discardSettled('upload', 'import');
+		}
 
-		job.value = first;
-
-		await runJob(
-			Promise.resolve(first),
-			'migratekit_import_step',
-			(state) => {
-				job.value = state;
-			},
-		);
-
-		done.value = true;
+		await upload(chosen, password.value, resumes.value ? waiting.value : null);
 	} catch (caught) {
+		// The server never took the upload: nothing is left waiting, so the page says why.
 		error.value = caught instanceof Error ? caught.message : 'The import failed.';
 	} finally {
-		running.value = false;
+		starting.value = false;
 	}
 }
+
+// The page draws its upload's progress where it always did; the panel above leaves it to the page.
+onMounted(() => showInline('upload', 'import'));
+
+onUnmounted(() => hideInline('upload', 'import'));
 </script>
 
 <template>
@@ -108,32 +124,19 @@ async function start(): Promise<void> {
 
 		<div class="mk-actions">
 			<button class="mk-btn" type="button" :disabled="running || !file" @click="start">
-				{{ running ? 'Importing…' : 'Import and replace' }}
+				{{ running ? 'Importing…' : resumes ? 'Continue the upload and import' : 'Import and replace' }}
 			</button>
 			<a v-if="done" class="mk-btn mk-btn-ghost" :href="config.siteUrl" target="_blank" rel="noopener">
 				Visit site
 			</a>
 		</div>
 
-		<div v-if="upload && upload.total > 0" class="mk-progress" role="status" aria-live="polite">
-			<div class="mk-bar">
-				<span :style="{ width: Math.min(100, Math.round((upload.received / upload.total) * 100)) + '%' }"></span>
-			</div>
-			<div class="mk-progress-meta">
-				<span>Uploading {{ formatBytes(upload.received) }} of {{ formatBytes(upload.total) }}</span>
-				<span>{{ Math.min(100, Math.round((upload.received / upload.total) * 100)) }}%</span>
-			</div>
-		</div>
+		<p v-if="resumes" class="mk-status">
+			This is the file of the interrupted upload — only the part that is missing is sent.
+		</p>
 
-		<div v-if="job" class="mk-progress" role="status" aria-live="polite">
-			<div class="mk-bar"><span :style="{ width: job.percent + '%' }"></span></div>
-			<div class="mk-progress-meta">
-				<span>{{ job.message || 'Working…' }}</span>
-				<span>{{ job.percent }}%</span>
-			</div>
-		</div>
+		<JobProgress v-if="job" :job="job" />
 
-		<p v-if="done" class="mk-success">Import complete. Re-save your permalinks if anything looks off.</p>
 		<p v-if="error" class="mk-error">{{ error }}</p>
 	</section>
 </template>

@@ -19,13 +19,13 @@ Core engine, every pipeline, the cloud storage layer and multisite support are i
 | Export pipeline (prepare → manifest → enumerate → archive content/media/plugins/themes → DB dump → finalize) | Done, resumable |
 | Import pipeline (validate → CRC → password → extract → DB import with URL/path replacement) | Done |
 | Backups repository, capabilities, secret key, job status | Done |
-| WordPress admin (Vue 3 + Vite: Dashboard, Export/Import/Backups, Cloud, Schedules, Reset — live progress, cron-health warnings, one-click starter schedule) | Done |
+| WordPress admin (Vue 3 + Vite: Dashboard, Export/Import/Backups, Cloud, Schedules, Reset — live progress that outlives the page it started on, cron-health warnings, one-click starter schedule) | Done |
 | WordPress wiring (menu, asset loading, AJAX job endpoints, backup download) | Done |
 | REST API (`migratekit/v1`: async jobs, logs, backups, one-click restore) | Done |
 | WP-CLI (`export`, `backup`, `import`, `restore`, `backups`, `label`, `files`, `reset`; `cloud list/test/files/push/pull`) | Done |
 | Scheduled backups (hourly → monthly), retention by count/age, email notifications, network scope, Schedules UI — cron runs plus an in-browser Run now with live progress | Done |
 | Reset Hub (site reset: content tables, transients, optional media files/users/plugin tables; safety backup; typed confirmation) | Done |
-| Cloud storage (S3-compatible + Dropbox + Google Drive: push/pull, settings UI, WP-CLI, scheduled cloud copies) | Done |
+| Cloud storage (S3-compatible + Dropbox + Google Drive: push/pull/restore, settings UI, WP-CLI, scheduled cloud copies) | Done |
 | Multisite (whole-network and per-site export/import, native and bundled) | Done |
 | Parity audit vs All-in-One WP Migration 7.112 | Done — see `docs/parity.md` |
 
@@ -39,6 +39,7 @@ Core engine, every pipeline, the cloud storage layer and multisite support are i
 
 - Supported backends: any S3-compatible storage (AWS S3, MinIO, Backblaze B2 via S3 API, Wasabi, …), Dropbox and Google Drive.
 - Push and pull are long-running cloud jobs with live progress, like export/import. Push publishes a local archive to the provider; pull reassembles a remote archive into a local `.wpress` file in the backups directory.
+- Every backup the storage lists has a **Restore** action next to Pull here: the same pull, followed by a restore that starts by itself once the archive has arrived. Stopping it during the fetch restores nothing.
 - Provider settings live in one option (`migratekit_cloud`) and are masked in every REST/API surface — a `********` value or an empty secret keeps the stored secret on save, so OAuth tokens always survive settings edits.
 - S3 talks SigV4 with unsigned payloads and always-multipart uploads, so plain-HTTP endpoints (MinIO on LAN) work out of the box.
 - Dropbox/Google Drive use OAuth2 with admin-post callbacks; the app must whitelisted the site's callback URL, which the Cloud page shows.
@@ -48,11 +49,22 @@ Core engine, every pipeline, the cloud storage layer and multisite support are i
 - Known limitation: if the site crashes mid-chunk on Dropbox/Drive, the provider-side upload cursor desyncs from the job state (S3 self-heals by listing parts). Restarting the push job (new session, overwrite mode) recovers either way.
 - Scheduled backups can name a cloud provider; each successful run publishes the new archive there automatically and appends the result to the schedule status and notification email.
 
+### Jobs and the admin pages
+
+- Every job the admin pages start — backups, restores, imports, pushes, pulls — is written down in the `migratekit_active_jobs` option, and the server keeps its progress. A page that loads asks which jobs are still open and carries on the ones that were merely waiting for a page, so the row with its progress bar is back after a reload, whichever MigrateKit page is opened.
+- Moving between MigrateKit pages does not interrupt a job. A reload, or a move away, while a job runs gets the browser's own "leave site?" dialog.
+- A job only advances while a page sends its step requests, so work with no page open waits on the server and is listed under **Unfinished tasks** with Resume. A job not touched for 12 hours (30 minutes for a restore) is listed but not continued unasked; a job whose step failed is listed with its reason and runs again only on Resume.
+- The one thing a reloaded page cannot continue is an upload, because the rest of the file lives in the browser. The row says so, and choosing the same file on the Import page sends only the rest.
+- A restore started from the cloud is a pull whose last step makes the restore a job in its own right, under an id reserved beforehand so that a request cut in between cannot make two. The database stage of an import replaces the options table, taking the job's own record and the registry with it: the runner writes both back afterwards and flushes the object cache.
+- An encrypted archive is found to be encrypted only once its restore is under way. The row then asks for the password, drops the attempt made without it and starts the restore again with the password, in the same row; a wrong password is asked again, and Resume on such a row reads "Enter password".
+- `migratekit_step_seconds` filters how long one step request may work (8 seconds by default). The smoke tests lower it so that a small site's jobs are cut across requests the way a large site's are.
+
 ### Cloud tooling
 
-- `php tests/run-cloud.php` — 148-check offline suite: SigV4 derivation invariants, request shaping with a fake transport, provider semantics (including the PKCE paste-code connection and service-account JWT minting), push/pull pipelines.
-- `tools/minio-integration.php` — real S3 round trip (multipart upload, listing, ranged download, delete) against any S3 endpoint; driven by `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` env vars.
+- `php tests/run-cloud.php` — 223-check offline suite: SigV4 derivation invariants, request shaping with a fake transport (including the S3 connection test's write check and the guidance added to a 403), provider semantics (including the PKCE paste-code connection, service-account JWT minting and upload sessions the storage has forgotten), push/pull pipelines, and transfers a reload cut off (lost sessions, stale offsets, overlong files).
+- `tools/minio-integration.php` — real S3 round trip (connection test, an abandoned upload discarded, multipart upload, listing, ranged download, delete) against any S3 endpoint; driven by `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_REGION` env vars.
 - `tools/wp-cloud-smoke.php` — run inside WordPress via `tools/wp-cloud-test.sh`; exercises the cloud REST routes, settings masking and a live push/pull round trip when `MK_CLOUD_*` env vars point at reachable storage.
+- `tools/wp-reload-smoke.php` — run inside WordPress with `wp eval-file` (its cloud part needs the same `MK_CLOUD_*` env vars); calls the AJAX handlers the way a reloaded page does, from the open-jobs listing alone: a backup, a waiting upload, a failed step, a pull that restores in one go and is cut across requests, the registry surviving the database import, and a restore started again with its password.
 
 ### Multisite notes
 
@@ -89,22 +101,25 @@ Live smoke: `tools/wp-parity-test.sh` (drive through `tools/wp-parity-test.sh` i
 Run with any PHP 7.4+ binary (no Composer required):
 
 ```bash
-php tests/run.php           # archive engine
-php tests/run-database.php  # database layer
-php tests/run-pipeline.php  # export pipeline
-php tests/run-import.php    # import pipeline
-php tests/run-storage.php   # backups + job ids
-php tests/run-reset.php     # reset pipeline
-php tests/run-cloud.php     # cloud providers + push/pull
-php tests/run-multisite.php # multisite scope/mapping/guards
-php tests/run-parity.php    # parity audit (filters, chunks, browser, labels)
+php tests/run.php            # archive engine
+php tests/run-database.php   # database layer
+php tests/run-pipeline.php   # export pipeline
+php tests/run-import.php     # import pipeline
+php tests/run-storage.php    # backups + job ids
+php tests/run-reset.php      # reset pipeline
+php tests/run-download.php   # single-file downloads from a backup
+php tests/run-cloud.php      # cloud providers + push/pull
+php tests/run-multisite.php  # multisite scope/mapping/guards
+php tests/run-parity.php     # parity audit (filters, chunks, browser, labels, jobs outliving their page)
 ```
+
+`sh tests/run-all.sh` runs them one after another and prints each summary line. On a Windows PHP that has no `OPENSSL_CONF` of its own, set it first (`OPENSSL_CONF=<php folder>/extras/ssl/openssl.cnf`); otherwise the cloud suite stops where it generates a key.
 
 `tools/interop-check.php` drives the reference plugin's own compressor/extractor to verify byte compatibility in both directions.
 
 `tools/mysql-integration.php <host> <user> <pass>` runs a real MariaDB dump/import round-trip (prefix change, URL replacement, serialized data, blobs, NULLs, exclusions). It also pages a 20,000-row table and tables with composite, text, decimal and binary keys, and checks that a dump written one page per request is byte-identical to one written in a single pass.
 
-`tools/wp-smoke.php`, `tools/wp-import-smoke.php`, `tools/wp-rest-smoke.php`, `tools/wp-schedule-smoke.php`, `tools/wp-reset-smoke.php` and `tools/wp-cloud-smoke.php` are run inside a real WordPress with `wp eval-file` to exercise the job runner end to end (`tools/wp-*-test.sh` drive each one). `tools/wp-long-smoke.php` does the same for a scheduled backup too big for one request: 60,000 files and a 500 MB incompressible file, with the cron requests that carry it along driven by hand.
+`tools/wp-smoke.php`, `tools/wp-import-smoke.php`, `tools/wp-rest-smoke.php`, `tools/wp-schedule-smoke.php`, `tools/wp-reset-smoke.php` and `tools/wp-cloud-smoke.php` are run inside a real WordPress with `wp eval-file` to exercise the job runner end to end (`tools/wp-*-test.sh` drive each one). `tools/wp-long-smoke.php` does the same for a scheduled backup too big for one request: 60,000 files and a 500 MB incompressible file, with the cron requests that carry it along driven by hand. `tools/wp-reload-smoke.php` (under *Cloud tooling* above) does it for a job outliving the page that started it.
 
 When the test install mounts the repository as the plugin (`tools/docker/smoke-compose.yml`), mount an empty volume over `wp-content/plugins/migratekit/storage` as well. Activating the plugin in the test install runs its storage cleanup, which deletes every job folder older than a week that the test install knows nothing about — including the real ones in the repository's `storage/`.
 

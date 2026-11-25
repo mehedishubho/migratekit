@@ -52,7 +52,16 @@ final class DatabaseStage implements StageInterface {
 
 		$importer->import_file((string) $state['database_file']);
 
-		$state['database_done'] = true;
+		// Every table now holds what the backup held, while WordPress still has the old rows in its object cache.
+		// Left that way, a write goes against rows that are gone: among them the job's own state, which would
+		// then never be saved, and the next request would find the job gone.
+		if (function_exists('wp_cache_flush')) {
+			wp_cache_flush();
+		}
+
+		// The options table is now the backup's: whatever the plugin keeps there is what the backup held.
+		$state['replaced_options'] = true;
+		$state['database_done']    = true;
 
 		$ctx->report('Imported the database');
 

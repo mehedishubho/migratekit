@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onMounted } from 'vue';
 import DashboardPage from './pages/DashboardPage.vue';
 import ExportPage from './pages/ExportPage.vue';
 import ImportPage from './pages/ImportPage.vue';
@@ -7,10 +7,20 @@ import BackupsPage from './pages/BackupsPage.vue';
 import SchedulesPage from './pages/SchedulesPage.vue';
 import ResetPage from './pages/ResetPage.vue';
 import CloudPage from './pages/CloudPage.vue';
+import JobPanel from './JobPanel.vue';
+import { active, resumeOpen } from './jobs';
+import { installLeaveGuard, watchLeaving } from './leave';
 
 const props = defineProps<{ page: string }>();
 
 const page = computed(() => props.page);
+
+onMounted(() => {
+	watchLeaving(() => active.value.length > 0);
+	installLeaveGuard();
+
+	void resumeOpen();
+});
 </script>
 
 <template>
@@ -32,6 +42,7 @@ const page = computed(() => props.page);
 		</header>
 
 		<main class="mk-main">
+			<JobPanel />
 			<DashboardPage v-if="page === 'home'" />
 			<ExportPage v-else-if="page === 'export'" />
 			<ImportPage v-else-if="page === 'import'" />

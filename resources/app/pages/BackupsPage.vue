@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
-import { config, formatBytes, formatDate, post, runJob, type JobState } from '../api';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { config, formatBytes, formatDate, post, type JobState } from '../api';
+import JobProgress from '../JobProgress.vue';
+import { hideInline, isActive, launch, showInline, withIntents, type TrackedJob } from '../jobs';
 
 interface Backup {
 	name: string;
@@ -22,10 +24,9 @@ const notice = ref('');
 const busy = ref<string | null>(null);
 const selected = ref<string[]>([]);
 
-const restoring = ref(false);
-const restoreJob = ref<JobState | null>(null);
-const restoreTarget = ref('');
-const restoreError = ref('');
+/** Restores this page shows: the ones started here, or the ones an earlier visit left unfinished. */
+const restores = withIntents('restore');
+const restoring = computed(() => restores.value.some(isActive));
 
 const explorer = ref<Backup | null>(null);
 const explorePassword = ref('');
@@ -136,6 +137,7 @@ async function rename(backup: Backup): Promise<void> {
 	}
 }
 
+/** The password of an encrypted archive is asked for by the job itself, once the restore is under way. */
 async function restore(name: string): Promise<void> {
 	if (restoring.value) {
 		return;
@@ -145,56 +147,12 @@ async function restore(name: string): Promise<void> {
 		return;
 	}
 
-	restoring.value = true;
-	restoreTarget.value = name;
-	restoreJob.value = null;
-	restoreError.value = '';
-
-	let password = '';
+	error.value = '';
 
 	try {
-		await runJob(
-			post<JobState>('migratekit_backup_restore', { name, password }),
-			'migratekit_import_step',
-			(state) => {
-				restoreJob.value = state;
-			},
-		);
-
-		notice.value = 'Restore complete. Sign in again if your session was replaced.';
+		await launch('restore', post<JobState>('migratekit_backup_restore', { name, password: '' }));
 	} catch (caught) {
-		const message = caught instanceof Error ? caught.message : 'The restore failed.';
-
-		if (/encrypt/i.test(message) && password === '') {
-			const reply = window.prompt('This backup is encrypted. Type the decryption password:') || '';
-			password = reply;
-		}
-
-		if (password !== '') {
-			restoreError.value = '';
-			restoring.value = true;
-			restoreJob.value = null;
-
-			try {
-				await runJob(
-					post<JobState>('migratekit_backup_restore', { name, password }),
-					'migratekit_import_step',
-					(state) => {
-						restoreJob.value = state;
-					},
-				);
-
-				notice.value = 'Restore complete. Sign in again if your session was replaced.';
-			} catch (caughtAgain) {
-				restoreError.value = caughtAgain instanceof Error ? caughtAgain.message : 'The restore failed.';
-			} finally {
-				restoring.value = false;
-			}
-		} else {
-			restoreError.value = message;
-		}
-	} finally {
-		restoring.value = false;
+		error.value = caught instanceof Error ? caught.message : 'The restore could not be started.';
 	}
 }
 
@@ -252,7 +210,14 @@ function closeExplorer(): void {
 	exploredValid.value = false;
 }
 
-onMounted(load);
+// The page draws its restores' progress where it always did; the panel above leaves them to the page.
+onMounted(() => {
+	showInline('restore');
+
+	void load();
+});
+
+onUnmounted(() => hideInline('restore'));
 </script>
 
 <template>
@@ -332,16 +297,7 @@ onMounted(load);
 			</tbody>
 		</table>
 
-		<div v-if="restoring" class="mk-progress" role="status" aria-live="polite">
-			<div class="mk-bar">
-				<span :style="{ width: (restoreJob ? restoreJob.percent : 0) + '%' }"></span>
-			</div>
-			<div class="mk-progress-meta">
-				<span>Restoring {{ restoreTarget }} — {{ restoreJob ? restoreJob.message : 'Preparing…' }}</span>
-				<span>{{ restoreJob ? restoreJob.percent : 0 }}%</span>
-			</div>
-		</div>
-		<p v-if="restoreError" class="mk-error">{{ restoreError }}</p>
+		<JobProgress v-for="job in restores" :key="job.key" :job="job" />
 
 		<div v-if="explorer" class="mk-modal" role="dialog" aria-modal="true">
 			<div class="mk-modal-head">

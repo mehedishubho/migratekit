@@ -393,6 +393,8 @@ final class DropboxProvider implements CloudProviderInterface {
 			return 0;
 		}
 
+		$sent = (int) ( $session['offset'] ?? 0 );
+
 		$response = $this->content(
 			'/files/upload_session/append_v2',
 			array(
@@ -400,7 +402,7 @@ final class DropboxProvider implements CloudProviderInterface {
 					array(
 						'cursor' => array(
 							'session_id' => (string) $session['session'],
-							'offset'     => (int) ( $session['offset'] ?? 0 ),
+							'offset'     => $sent,
 						),
 						'close'  => false,
 					)
@@ -411,10 +413,24 @@ final class DropboxProvider implements CloudProviderInterface {
 		);
 
 		if ($response['status'] !== 200) {
+			$held = self::held_offset($response);
+
+			// Dropbox is ahead of the job: a request that was cut off appended more than the job saved.
+			if ($held !== null && $held > $sent) {
+				$session['offset'] = $held;
+
+				return 0;
+			}
+
+			// Expired, or its position can no longer be established.
+			if ($held !== null || $response['status'] === 404 || $response['status'] === 410 || self::mentions($response, 'not_found')) {
+				throw new SessionLostException('The Dropbox upload session is no longer valid.');
+			}
+
 			throw new \RuntimeException($this->message('Uploading a Dropbox chunk failed', $response));
 		}
 
-		$session['offset'] = (int) ( $session['offset'] ?? 0 ) + strlen($chunk);
+		$session['offset'] = $sent + strlen($chunk);
 
 		return strlen($chunk);
 	}
@@ -444,6 +460,12 @@ final class DropboxProvider implements CloudProviderInterface {
 		if ($response['status'] !== 200) {
 			throw new \RuntimeException($this->message('Finishing the Dropbox upload session failed', $response));
 		}
+	}
+
+	/**
+	 * Dropbox drops an unused upload session by itself after a while.
+	 */
+	public function upload_abort(array $session): void {
 	}
 
 	public function download_start(string $remote, int $size = 0): array {
@@ -559,6 +581,85 @@ final class DropboxProvider implements CloudProviderInterface {
 		$folder = $this->field('folder');
 
 		return $folder !== '' ? '/' . $folder . '/' . $remote : '/' . $remote;
+	}
+
+	/**
+	 * Where Dropbox says an upload session ends, when it refused an append
+	 * because the offset sent was behind. Null when it said nothing about an offset.
+	 *
+	 * @param array{status:int,headers:array<string,string>,body:string,error:string} $response Transport response.
+	 * @return int|null
+	 */
+	private static function held_offset(array $response): ?int {
+		$sources = array( $response['headers']['dropbox-api-result'] ?? '', $response['body'] );
+
+		foreach ($sources as $raw) {
+			$decoded = json_decode((string) $raw, true);
+
+			if (is_array($decoded)) {
+				$offset = self::find_offset($decoded);
+
+				if ($offset !== null) {
+					return $offset;
+				}
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * The offset in a refusal, wherever Dropbox's error shape puts it: the
+	 * incorrect_offset variant carries the right value, named or bare.
+	 *
+	 * @param mixed $node Decoded error.
+	 * @return int|null
+	 */
+	private static function find_offset($node): ?int {
+		if ( ! is_array($node)) {
+			return null;
+		}
+
+		foreach ($node as $key => $value) {
+			if ( ! is_string($key)) {
+				continue;
+			}
+
+			if ( $key === 'incorrect_offset' || $key === 'lookup_failed' || $key === 'correct_offset' ) {
+				if ( is_numeric($value) ) {
+					return (int) $value;
+				}
+
+				if ( is_array($value) && isset($value['correct_offset']) && is_numeric($value['correct_offset']) ) {
+					return (int) $value['correct_offset'];
+				}
+			}
+		}
+
+		foreach ($node as $value) {
+			$offset = self::find_offset($value);
+
+			if ( $offset !== null) {
+				return $offset;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * @param array{status:int,headers:array<string,string>,body:string,error:string} $response Transport response.
+	 * @param string $needle Lower-case fragment.
+	 * @return bool
+	 */
+	private static function mentions(array $response, string $needle): bool {
+		foreach ( array( $response['headers']['dropbox-api-result'] ?? '', $response['body'] ) as $raw ) {
+			if ( strpos(strtolower((string) $raw), $needle) !== false ) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	/**

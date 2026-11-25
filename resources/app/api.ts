@@ -35,6 +35,27 @@ export interface JobState {
 	archiveName: string;
 	cloud?: string;
 	remote?: string;
+	/** Name the storage is known by to the user, e.g. "S3". */
+	cloudLabel?: string;
+	/** The file the job is about: the backup pushed, pulled, restored or uploaded. */
+	backupName?: string;
+	/** Where an import's archive came from: 'upload', 'backup' or 'cloud'. */
+	source?: string;
+	/** A pull that restores the backup once it has arrived. */
+	restore?: boolean;
+	/** Id of the restore job a finished pull started. */
+	restoreJob?: string;
+	/** Size the browser announced for an upload, 0 when unknown. */
+	total?: number;
+	/** Server time of the last change made to the job. */
+	updatedAt?: number;
+	/** Why its last step failed, until a step succeeds again. */
+	error?: string;
+	/** Listed only: the job waited so long that a page should not continue it unasked. */
+	stale?: boolean;
+	/** Another request was still running the job's step, so this one changed nothing. */
+	busy?: boolean;
+	cancelled?: boolean;
 }
 
 type Payload = Record<string, unknown>;
@@ -250,28 +271,6 @@ export async function driveJob(
 	return state;
 }
 
-/** localStorage key of the export job the browser last drove, so a later page load can resume it. */
-export const ACTIVE_EXPORT_KEY = 'migratekit-dashboard-job';
-
-export function rememberExport(jobId: string): void {
-	window.localStorage.setItem(ACTIVE_EXPORT_KEY, JSON.stringify({ id: jobId }));
-}
-
-export function forgetExport(): void {
-	window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
-}
-
-/** Id of the export job a previous page load left unfinished, or ''. */
-export function activeExportId(): string {
-	try {
-		const raw = window.localStorage.getItem(ACTIVE_EXPORT_KEY);
-
-		return raw ? ((JSON.parse(raw) as { id?: string }).id ?? '') : '';
-	} catch {
-		return '';
-	}
-}
-
 export interface UploadProgress {
 	/** Bytes accepted by the server so far. */
 	received: number;
@@ -279,22 +278,33 @@ export interface UploadProgress {
 	total: number;
 }
 
+/** Reserve the job an archive is about to be uploaded to. The name and size let a reloaded page recognise the same file. */
+export function reserveUpload(file: File, password: string): Promise<JobState> {
+	return post<JobState>('migratekit_import_chunk', {
+		phase: 'start',
+		password,
+		name: file.name,
+		size: file.size,
+	});
+}
+
 /**
- * Upload an archive in server-bypassing chunks, resumable on chunk retries.
- * The server tracks accepted bytes; each chunk carries its byte offset so a
- * retried (or repeated) send is idempotent.
+ * Send an archive in server-bypassing chunks, then hand the assembled file to
+ * its job. The server tracks accepted bytes; each chunk carries its byte
+ * offset so a retried (or repeated) send is idempotent. `job` is the reserved
+ * job: the upload starts from the byte count the server last confirmed, so a
+ * page that was reloaded continues the upload instead of starting it over.
  */
-export async function uploadImport(
+export async function sendUpload(
 	file: File,
-	password: string,
+	job: JobState,
 	onProgress: (progress: UploadProgress) => void,
 ): Promise<JobState> {
-	const start = await post<JobState>('migratekit_import_chunk', { phase: 'start', password });
 	const chunkSize = Math.max(384 * 1024, Math.min(config.maxUpload - 48 * 1024, 5 * 1024 * 1024));
 	const total = file.size;
 	const attempts = 3;
 
-	let received = 0;
+	let received = job.received;
 
 	while (received < total) {
 		const offset = received;
@@ -307,7 +317,7 @@ export async function uploadImport(
 			try {
 				const state = await post<JobState>(
 					'migratekit_import_chunk',
-					{ phase: 'append', job_id: start.id, offset },
+					{ phase: 'append', job_id: job.id, offset },
 					part,
 				);
 
@@ -334,7 +344,7 @@ export async function uploadImport(
 
 	const finish = await post<JobState>('migratekit_import_chunk', {
 		phase: 'finish',
-		job_id: start.id,
+		job_id: job.id,
 		total,
 		name: file.name,
 	});
