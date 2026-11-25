@@ -116,6 +116,30 @@ echo "\n[2] CRC32 vector\n";
 same('crc32b("123456789") == cbf43926', 'cbf43926', Crc32::hex('123456789'));
 same('crc32b("") == 00000000', '00000000', Crc32::hex(''));
 
+// A checksum carried across requests: the CRCs of two parts combine into the CRC of the whole.
+$combined_input = random_bytes(300000);
+
+foreach (array( 0, 1, 1000, 299999, 300000 ) as $split) {
+	same(
+		'crc32 combine, split at ' . $split,
+		Crc32::hex($combined_input),
+		Crc32::combine(Crc32::hex(substr($combined_input, 0, $split)), Crc32::hex(substr($combined_input, $split)), strlen($combined_input) - $split)
+	);
+}
+
+$two_parts = Crc32::combine(Crc32::hex(substr($combined_input, 0, 70000)), Crc32::hex(substr($combined_input, 70000, 130000)), 130000);
+
+same('crc32 combine, three parts', Crc32::hex($combined_input), Crc32::combine($two_parts, Crc32::hex(substr($combined_input, 200000)), 100000));
+same('crc32 combine, many tiny parts', Crc32::hex($combined_input), (static function (string $input): string {
+	$crc = null;
+
+	foreach ( str_split( $input, 700 ) as $piece ) {
+		$crc = Crc32::combine( $crc, Crc32::hex( $piece ), strlen( $piece ) );
+	}
+
+	return (string) $crc;
+})($combined_input));
+
 // ---------------------------------------------------------------------------
 echo "\n[3] Encryption primitive\n";
 $encryptor = new Encryptor('correct horse battery staple');

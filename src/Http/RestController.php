@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace MigrateKit\Http;
 
+use MigrateKit\Admin\AssetLoader;
 use MigrateKit\Archive\Inspector;
 use MigrateKit\Archive\Reader;
 use MigrateKit\Cloud\Manager;

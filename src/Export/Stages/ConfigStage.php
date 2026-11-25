@@ -24,14 +24,19 @@ final class ConfigStage implements StageInterface {
 			throw new \RuntimeException('Unable to encode the export manifest.');
 		}
 
+		// package.json always opens the archive: restart it from byte 0, dropping a copy a killed request may have left.
 		$writer = new Writer(
 			$state['archive_path'],
 			$state['compression'],
 			$state['password'],
-			false
+			false,
+			0
 		);
 
 		$writer->add_contents('package.json', $json, time());
+
+		$state['archive_offset'] = $writer->tell();
+
 		$writer->close(false);
 
 		$state['config'] = $config;

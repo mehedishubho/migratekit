@@ -26,11 +26,17 @@ final class Runner {
 	public const PUSH   = 'push';
 	public const PULL   = 'pull';
 
-	public const EXPORT_STAGES = 13;
+	public const EXPORT_STAGES = 14;
 	public const IMPORT_STAGES = 8;
 	public const RESET_STAGES  = 8;
 	public const PUSH_STAGES   = 3;
 	public const PULL_STAGES   = 3;
+
+	/** Seconds of work per request before the job yields to the next one. */
+	private const STEP_SECONDS = 8.0;
+
+	/** Seconds to wait for a concurrent step of the same job before reporting the job unchanged. */
+	private const LOCK_WAIT = 2.0;
 
 	/**
 	 * @param string $type Job type constant.
@@ -157,12 +163,44 @@ final class Runner {
 	 * @return array Public job state.
 	 */
 	public static function advance(string $job_id): array {
-		$state = Status::read($job_id);
+		$state = self::read_fresh($job_id);
 
 		if ($state === array()) {
 			throw new \RuntimeException('Job not found.');
 		}
 
+		if (( $state['type'] ?? '' ) === self::EXPORT && isset($state['manifests'])) {
+			throw new \RuntimeException('This backup was started by an earlier version of MigrateKit and cannot be continued. Start a new backup.');
+		}
+
+		// Overlapping step requests (a browser retry while the first is still running) must never advance one job twice.
+		$lock = self::lock($state);
+
+		if ($lock === null) {
+			return self::status($job_id);
+		}
+
+		try {
+			$latest = self::read_fresh($job_id);
+
+			if ($latest === array()) {
+				throw new \RuntimeException('Job not found.');
+			}
+
+			return self::step($job_id, $latest);
+		} finally {
+			self::unlock($lock);
+		}
+	}
+
+	/**
+	 * Run one chunk of a job while holding its lock.
+	 *
+	 * @param string $job_id Job identifier.
+	 * @param array  $state  Job state as stored.
+	 * @return array Public job state.
+	 */
+	private static function step(string $job_id, array $state): array {
 		$type   = isset($state['type']) ? (string) $state['type'] : self::EXPORT;
 		$status = static function (string $message, ?int $percent = null) use (&$state): void {
 			$state['message'] = $message;
@@ -186,11 +224,16 @@ final class Runner {
 			Maintenance::start();
 		}
 
+		if ($type === self::EXPORT) {
+			self::assert_resumable($state);
+			self::discard_dump($state);
+		}
+
 		$context = new PipelineContext(
 			Factory::create($GLOBALS['wpdb']),
 			WordPressSiteContext::build(),
 			$status,
-			8.0
+			self::time_budget()
 		);
 
 		$factory  = self::pipeline_factory($type);
@@ -218,9 +261,126 @@ final class Runner {
 			}
 		}
 
-		Status::write($job_id, $state);
+		// Once the step that packed the dump has been saved, its loose copy is only using disk space.
+		if (Status::write($job_id, $state) && $type === self::EXPORT) {
+			self::discard_dump($state);
+		}
 
 		return self::public_state($state, $done, $pipeline->stage_count());
+	}
+
+	/**
+	 * Job state straight from storage.
+	 *
+	 * Another request may have advanced the job while this one waited for its
+	 * lock, and that write is not in this request's object cache.
+	 *
+	 * @param string $job_id Job identifier.
+	 * @return array
+	 */
+	private static function read_fresh(string $job_id): array {
+		if (function_exists('wp_cache_delete')) {
+			wp_cache_delete(Status::OPTION_PREFIX . $job_id, 'options');
+		}
+
+		return Status::read($job_id);
+	}
+
+	/**
+	 * Seconds of work per request: the standard slice, or less when the host's
+	 * execution limit is too short to fit it.
+	 *
+	 * @return float
+	 */
+	private static function time_budget(): float {
+		$limit = (int) @ini_get('max_execution_time');
+
+		return $limit <= 0 ? self::STEP_SECONDS : max(1.0, min(self::STEP_SECONDS, $limit * 0.5));
+	}
+
+	/**
+	 * Refuse an export whose built archive is gone. Storage cleanup removes the
+	 * working files of a backup that waited too long to be resumed.
+	 *
+	 * @param array $state Job state as stored.
+	 * @return void
+	 */
+	private static function assert_resumable(array $state): void {
+		if (! empty($state['done']) || empty($state['archive_offset']) || empty($state['archive_path']) || is_file((string) $state['archive_path'])) {
+			return;
+		}
+
+		throw new \RuntimeException('The partially built backup is no longer on this server, so it cannot be continued. Start a new backup.');
+	}
+
+	/**
+	 * Delete the loose database dump once the step that packed it into the
+	 * archive has been saved.
+	 *
+	 * @param array $state Job state as stored.
+	 * @return void
+	 */
+	private static function discard_dump(array $state): void {
+		if (empty($state['database_added']) || empty($state['database_file']) || ! is_file($state['database_file'])) {
+			return;
+		}
+
+		@unlink($state['database_file']);
+	}
+
+	/**
+	 * Take the job's exclusive lock, briefly waiting for a concurrent step to finish.
+	 *
+	 * @param array $state Job state as stored.
+	 * @return resource|bool|null The lock to release, true when there is nothing to lock, or null while another request holds it.
+	 */
+	private static function lock(array $state) {
+		$directory = isset($state['storage_dir']) ? (string) $state['storage_dir'] : '';
+
+		if ($directory === '') {
+			return true;
+		}
+
+		$handle = @fopen($directory . DIRECTORY_SEPARATOR . 'lock', 'c');
+
+		if ($handle === false) {
+			return true;
+		}
+
+		$waited = 0.0;
+
+		while (true) {
+			$would_block = 0;
+
+			if (@flock($handle, LOCK_EX | LOCK_NB, $would_block)) {
+				return $handle;
+			}
+
+			// Without $would_block the failure is not contention: locking is unsupported here, so carry on without it.
+			if ($would_block === 0) {
+				return $handle;
+			}
+
+			if ($waited >= self::LOCK_WAIT) {
+				fclose($handle);
+
+				return null;
+			}
+
+			usleep(200000);
+			$waited += 0.2;
+		}
+	}
+
+	/**
+	 * @param resource|bool|null $lock Lock returned by lock().
+	 * @return void
+	 */
+	private static function unlock($lock): void {
+		if (is_resource($lock)) {
+			@flock($lock, LOCK_UN);
+			fclose($lock);
+		}
 	}
 
 	/**

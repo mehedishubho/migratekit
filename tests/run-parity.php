@@ -20,6 +20,8 @@ use MigrateKit\Archive\Protocol;
 use MigrateKit\Archive\Reader;
 use MigrateKit\Archive\Writer;
 use MigrateKit\Export\ExportConfig;
+use MigrateKit\Export\ExportPipeline;
+use MigrateKit\Export\Manifest;
 use MigrateKit\Export\Stages\EnumerateFilesStage;
 use MigrateKit\Http\Options;
 use MigrateKit\Import\Stages\DatabaseStage as ImportDatabaseStage;
@@ -146,18 +148,40 @@ $enum_site = new SiteContext(array(
 	'network_plugins' => array(),
 ));
 
+/**
+ * Paths a completed listing holds, relative to its source root and sorted.
+ */
+function pw_listed(string $storage, string $key): array {
+	$handle = fopen(Manifest::path($storage, $key), 'rb');
+	$paths  = array();
+
+	while ( ( $entry = Manifest::read($handle) ) !== null ) {
+		$paths[] = str_replace('\\', '/', $entry['path']);
+	}
+
+	fclose($handle);
+	sort($paths);
+
+	return $paths;
+}
+
+$enum_storage = $tmp . '/enum-storage';
+mkdir($enum_storage, 0777, true);
+
 $ctx = new PipelineContext(null, $enum_site, null, 0.0);
 
-$state = array( 'paths' => array(
-	'plugins_path' => trail_test($enum_tmp . '/wp-content/plugins'),
-	'themes_path'  => trail_test($enum_tmp . '/wp-content/themes'),
-), 'options' => array( 'no_inactive_plugins' => true ) );
+$state = array(
+	'storage_dir' => $enum_storage,
+	'paths'        => array(
+		'plugins_path' => trail_test($enum_tmp . '/wp-content/plugins'),
+		'themes_path'  => trail_test($enum_tmp . '/wp-content/themes'),
+	),
+	'options'      => array( 'no_inactive_plugins' => true ),
+);
 
-(new EnumerateFilesStage('plugins', 'plugins_path', 'plugins', array(), array(), '', 'no_inactive_plugins', 'plugins'))->run($state, $ctx);
-
-$same = array_map('basename', $state['manifests']['plugins']);
-sort($same);
-same_pw('inactive plugins filtered out', array( 'hello.php', 'main.php' ), $same);
+check_pw('listing finishes in one pass when time allows', (new EnumerateFilesStage('plugins', 'plugins_path', 'plugins', array(), array(), '', 'no_inactive_plugins', 'plugins'))->run($state, $ctx) === true);
+same_pw('listing records file count and size', array( 2, 2 ), array( $state['scans']['plugins']['files'], $state['scans']['plugins']['bytes'] ));
+same_pw('inactive plugins filtered out', array( 'alpha/inc/main.php', 'hello.php' ), pw_listed($enum_storage, 'plugins'));
 
 $ctx = new PipelineContext(null, $enum_site, null, 0.0);
 $theme_state = $state;
@@ -165,15 +189,13 @@ $theme_state['options'] = array( 'no_inactive_themes' => true );
 
 (new EnumerateFilesStage('themes', 'themes_path', 'themes', array(), array(), '', 'no_inactive_themes', 'themes'))->run($theme_state, $ctx);
 
-$themes = array_map('basename', $theme_state['manifests']['themes']);
-sort($themes);
-same_pw('inactive themes filtered out', array( 'style.css' ), $themes);
+same_pw('inactive themes filtered out', array( 'twenty/style.css' ), pw_listed($enum_storage, 'themes'));
 
-$wide_state = array( 'paths' => $theme_state['paths'], 'options' => array() );
+$wide_state = array( 'storage_dir' => $enum_storage, 'paths' => $theme_state['paths'], 'options' => array() );
 (new EnumerateFilesStage('plugins', 'plugins_path', 'plugins'))->run($wide_state, $ctx);
-same_pw('filter off keeps everything', 3, count($wide_state['manifests']['plugins']));
+same_pw('filter off keeps everything', 3, count(pw_listed($enum_storage, 'plugins')));
 
-$network_state = array( 'paths' => $state['paths'], 'options' => array( 'no_inactive_plugins' => true ) );
+$network_state = array( 'storage_dir' => $enum_storage, 'paths' => $state['paths'], 'options' => array( 'no_inactive_plugins' => true ) );
 $network_site = new SiteContext(array(
 	'plugins_path'    => trail_test($enum_tmp . '/wp-content/plugins'),
 	'themes_path'     => trail_test($enum_tmp . '/wp-content/themes'),
@@ -183,7 +205,87 @@ $network_site = new SiteContext(array(
 	'stylesheet'      => 'twenty',
 ));
 (new EnumerateFilesStage('plugins', 'plugins_path', 'plugins', array(), array(), '', 'no_inactive_plugins', 'plugins'))->run($network_state, new PipelineContext(null, $network_site, null, 0.0));
-same_pw('network-activated plugins count as active', 1, count($network_state['manifests']['plugins']));
+same_pw('network-activated plugins count as active', 1, count(pw_listed($enum_storage, 'plugins')));
+
+// Excluded folders never enter the listing: other backup plugins' archives and this plugin's own backups directory.
+$excluded_tmp = $sanity;
+mkdir($excluded_tmp . '/ai1wm-backups/storage', 0777, true);
+mkdir($excluded_tmp . '/backupwordpress-abc123-backups', 0777, true);
+mkdir($excluded_tmp . '/backups-dup-lite', 0777, true);
+mkdir($excluded_tmp . '/languages', 0777, true);
+mkdir($excluded_tmp . '/custom-backups/deep', 0777, true);
+file_put_contents($excluded_tmp . '/ai1wm-backups/storage/site.wpress', 'old backup');
+file_put_contents($excluded_tmp . '/backupwordpress-abc123-backups/site.zip', 'old backup');
+file_put_contents($excluded_tmp . '/backups-dup-lite/site.zip', 'old backup');
+file_put_contents($excluded_tmp . '/custom-backups/deep/site.wpress', 'old backup');
+file_put_contents($excluded_tmp . '/languages/en_US.mo', 'translations');
+file_put_contents($excluded_tmp . '/ai1wm-backups.php', 'a file that merely looks like the excluded folder');
+
+// A backups directory moved somewhere else under wp-content is excluded by path, not by name.
+OptionStore::put('migratekit_backups_path', $excluded_tmp . '/custom-backups');
+$content_stage = null;
+
+foreach (ExportPipeline::stages() as $stage) {
+	if ($stage instanceof EnumerateFilesStage) {
+		$content_stage = $stage;
+		break;
+	}
+}
+
+OptionStore::drop('migratekit_backups_path');
+check_pw('pipeline has a wp-content listing stage', $content_stage !== null);
+
+$excluded_state = array(
+	'storage_dir' => $enum_storage,
+	'paths'        => array( 'content_path' => trail_test($excluded_tmp) ),
+	'options'      => array(),
+);
+check_pw('excluded-folders listing completes', $content_stage->run($excluded_state, new PipelineContext(null, new SiteContext(array()), null, 0.0)) === true);
+same_pw('other backup plugins and custom backup folders are left out', array( 'ai1wm-backups.php', 'languages/en_US.mo' ), pw_listed($enum_storage, 'content'));
+
+// A listing that runs out of time resumes where it stopped, and bytes a killed
+// request left behind are dropped instead of being listed twice.
+$resume_tmp = $enum_tmp . '/resume-root';
+mkdir($resume_tmp . '/a/b', 0777, true);
+mkdir($resume_tmp . '/c', 0777, true);
+$resume_expected = array();
+
+for ($i = 0; $i < 5; $i++) {
+	file_put_contents($resume_tmp . '/a/b/f' . $i . '.txt', str_repeat('x', 100));
+	file_put_contents($resume_tmp . '/c/g' . $i . '.txt', str_repeat('y', 1000));
+	$resume_expected[] = 'a/b/f' . $i . '.txt';
+	$resume_expected[] = 'c/g' . $i . '.txt';
+}
+
+sort($resume_expected);
+
+$resume_state = array(
+	'storage_dir' => $tmp . '/resume-storage',
+	'paths'        => array( 'content_path' => trail_test($resume_tmp) ),
+	'options'      => array(),
+);
+mkdir($resume_state['storage_dir'], 0777, true);
+
+$resume_stage = new EnumerateFilesStage('resume', 'content_path', '');
+$expired      = new PipelineContext(null, new SiteContext(array()), null, 0.0000001);
+$resume_calls = 0;
+
+while ( ! $resume_stage->run($resume_state, $expired) ) {
+	++$resume_calls;
+
+	if ($resume_calls === 1) {
+		file_put_contents(Manifest::path($resume_state['storage_dir'], 'resume'), 'left by a killed request', FILE_APPEND);
+		file_put_contents(Manifest::queue_path($resume_state['storage_dir'], 'resume'), 'left by a killed request', FILE_APPEND);
+	}
+
+	if ($resume_calls > 30) {
+		break;
+	}
+}
+
+check_pw('listing yields to its deadline and resumes', $resume_calls >= 3 && $resume_calls < 30);
+same_pw('resumed listing has every file exactly once', $resume_expected, pw_listed($resume_state['storage_dir'], 'resume'));
+same_pw('resumed listing totals match its files', array( 10, 5500 ), array( $resume_state['scans']['resume']['files'], $resume_state['scans']['resume']['bytes'] ));
 
 // ---------------------------------------------------------------------------
 echo "\n[4] Chunked import job state\n";
@@ -345,17 +447,19 @@ echo "\n[7] Job storage pruning\n";
 
 $prune_root = Paths::storage(); // prune scans this directory directly.
 
-foreach (array( 'job-aaa', 'job-bbb', 'job-ccc', 'job-ddd', 'job-eee' ) as $id) {
+$now = time();
+
+foreach (array( 'job-aaa' => 9 * 86400, 'job-bbb' => 2 * 3600, 'job-ccc' => 8 * 86400, 'job-ddd' => 3 * 86400, 'job-eee' => 30 * 86400, 'job-fff' => 30 * 86400 ) as $id => $age) {
 	mkdir($prune_root . '/' . $id, 0777, true);
 	file_put_contents($prune_root . '/' . $id . '/log.log', 'x');
+	touch($prune_root . '/' . $id, $now - $age);
+	touch($prune_root . '/' . $id . '/log.log', $now - $age);
 }
 
-$now = time();
-touch($prune_root . '/job-aaa', $now - 9 * 86400);
-touch($prune_root . '/job-bbb', $now - 2 * 3600);
-touch($prune_root . '/job-ccc', $now - 8 * 86400);
-touch($prune_root . '/job-ddd', $now - 3 * 86400);
-touch($prune_root . '/job-eee', $now - 30 * 86400);
+// job-fff: unfinished, its folder a month old, but its half-built archive was written an hour ago, as a resumed backup's is.
+file_put_contents($prune_root . '/job-fff/site.wpress', 'half built');
+touch($prune_root . '/job-fff/site.wpress', $now - 3600);
+touch($prune_root . '/job-fff', $now - 30 * 86400);
 
 // job-aaa + job-eee: finished and older than the finished grace window.
 OptionStore::put('migratekit_status_job-aaa', array( 'done' => true, 'type' => 'export' ));
@@ -371,6 +475,7 @@ check_pw('finished ancient job removed', ! is_dir($prune_root . '/job-aaa'));
 check_pw('finished ancient job (second) removed', ! is_dir($prune_root . '/job-eee'));
 check_pw('unfinished fresh job kept', is_dir($prune_root . '/job-bbb'));
 check_pw('unfinished 3-day job kept', is_dir($prune_root . '/job-ddd'));
+check_pw('resumed backup kept while its archive is being written', is_dir($prune_root . '/job-fff'));
 
 $removed2 = Cron::prune($now);
 same_pw('fresh dirs survive the next run', 0, $removed2);

@@ -11,6 +11,8 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 
+use MigrateKit\Archive\Crc32;
+use MigrateKit\Archive\Header;
 use MigrateKit\Archive\Reader;
 use MigrateKit\Archive\Writer;
 use MigrateKit\Database\Driver\DriverInterface;
@@ -62,8 +64,14 @@ final class PipelineFakeDriver implements DriverInterface {
 	public function query(string $sql) {
 		$this->statements[] = $sql;
 
-		if (preg_match('/^SELECT \* FROM `([^`]+)`/iu', trim($sql), $match) === 1) {
+		if (preg_match('/^SELECT \* FROM `([^`]+)`(.*)$/iu', trim($sql), $match) === 1) {
 			$rows = isset($this->tables[ $match[1] ]['rows']) ? $this->tables[ $match[1] ]['rows'] : array();
+
+			// The dumper pages through rows; honour the page it asked for.
+			if (preg_match('/\bLIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?$/i', $match[2], $limit) === 1) {
+				$rows = array_slice($rows, isset($limit[2]) && $limit[2] !== '' ? (int) $limit[2] : 0, (int) $limit[1]);
+			}
+
 			return new PipelineResult($rows);
 		}
 
@@ -292,6 +300,58 @@ same_pl(
 );
 
 // ---------------------------------------------------------------------------
+echo "\n[2b] A killed request cannot corrupt the archive\n";
+
+function pl_digests(Reader $reader): array {
+	$digests = array();
+
+	foreach ($reader->entries() as $entry) {
+		$digests[] = $entry->relative_path() . ' ' . hash('sha256', $reader->read($entry));
+	}
+
+	return $digests;
+}
+
+$killed_archive = $tmp . '/killed.wpress';
+$killed_source  = $tmp . '/killed-source.bin';
+$killed_payload = random_bytes(1500000);
+
+file_put_contents($killed_source, $killed_payload);
+
+$killed_offset  = 0;
+$killed_written = 0;
+$killed_header  = null;
+$killed_crc     = null;
+
+$writer = new Writer($killed_archive, null, null, true);
+
+// A deadline of "now" forces at most one chunk per call.
+$completed = $writer->add_file_chunk('uploads/killed.bin', $killed_source, $killed_offset, $killed_written, 1700000000, $killed_header, microtime(true), $killed_crc);
+$writer->close(false);
+
+$durable = $killed_header + Header::LENGTH + $killed_written;
+
+check_pl('first slice stops at its deadline', ! $completed && $killed_offset > 0 && $killed_offset < strlen($killed_payload));
+
+// What the kill leaves behind: bytes the export's saved state never recorded.
+file_put_contents($killed_archive, str_repeat('Z', 4096), FILE_APPEND);
+
+$writer    = new Writer($killed_archive, null, null, false, $durable);
+$completed = $writer->add_file_chunk('uploads/killed.bin', $killed_source, $killed_offset, $killed_written, 1700000000, $killed_header, null, $killed_crc);
+$writer->close(false);
+
+check_pl('resumed slice completes the record', $completed);
+
+(new Writer($killed_archive, null, null, false))->close(true);
+
+$killed_reader = new Reader($killed_archive);
+
+check_pl('archive survives a killed request', $killed_reader->is_valid() && $killed_reader->verify_archive_crc());
+check_pl('killed request left no stray record', 1 === count($killed_reader->entries()));
+same_pl('record after a killed request round-trips', hash('sha256', $killed_payload), hash('sha256', $killed_reader->read($killed_reader->find('uploads/killed.bin'))));
+same_pl('crc carried across requests matches one pass', Crc32::hex($killed_payload), $killed_reader->find('uploads/killed.bin')->crc());
+
+// ---------------------------------------------------------------------------
 echo "\n[3] Compressed + encrypted export\n";
 $archive2 = $tmp . '/secure.wpress';
 $state2 = array(
@@ -330,6 +390,55 @@ try {
 	$threw = true;
 }
 check_pl('wrong password fails to read', $threw);
+
+// ---------------------------------------------------------------------------
+echo "\n[4] Export stepped across many tiny requests, each killed after saving\n";
+
+$stepped_archive = $tmp . '/stepped.wpress';
+$stepped_state   = array(
+	'archive_path' => $stepped_archive,
+	'storage_dir'  => $tmp . '/stepped-storage',
+	'options'      => array(
+		'no_post_revisions' => true,
+		'compression'       => '',
+		'password'          => '',
+	),
+);
+
+// An already-expired deadline makes every stage do the least it can before yielding, like the slowest possible host.
+$expired_ctx = new PipelineContext($db, $site, null, 0.0000001);
+$stage_list  = ExportPipeline::stages();
+$stage_index = 0;
+$steps       = 0;
+
+while ($stage_index < count($stage_list)) {
+	if (! $stage_list[ $stage_index ]->run($stepped_state, $expired_ctx)) {
+		// Bytes a killed request leaves behind, past everything the saved state recorded.
+		file_put_contents($stepped_archive, 'LEFT BY A KILLED REQUEST', FILE_APPEND);
+
+		if (is_file($stepped_state['storage_dir'] . '/database.sql')) {
+			file_put_contents($stepped_state['storage_dir'] . '/database.sql', 'LEFT BY A KILLED REQUEST', FILE_APPEND);
+		}
+
+		if (++$steps > 500) {
+			break;
+		}
+
+		continue;
+	}
+
+	++$stage_index;
+}
+
+check_pl('stepped export runs every stage', $stage_index === count($stage_list));
+check_pl('stepped export needed many requests', $steps > 10);
+
+$stepped_reader = new Reader($stepped_archive);
+
+check_pl('stepped archive is valid', $stepped_reader->is_valid());
+check_pl('stepped archive CRC verifies', $stepped_reader->verify_archive_crc());
+same_pl('stepped export has the same records as one pass', pl_digests(new Reader($archive)), pl_digests($stepped_reader));
+check_pl('stepped export records its size', ! empty($stepped_state['archive_size']));
 
 // ---------------------------------------------------------------------------
 echo "\n";

@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import { config, formatDate, friendlyInterval, inWords, intervalSeconds, post, runJob, type JobState } from '../api';
+import {
+	config,
+	driveJob,
+	formatDate,
+	friendlyInterval,
+	inWords,
+	intervalSeconds,
+	post,
+	runJob,
+	type JobState,
+	type RetryNotice,
+} from '../api';
 import { saveStarterSchedule } from '../presets';
 
 interface ScheduleOptions {
@@ -43,6 +54,35 @@ const starterBusy = ref(false);
 /** An in-browser Run now: the export job state plus the schedule label. */
 const activeRun = ref<{ name: string } | null>(null);
 const runJobState = ref<JobState | null>(null);
+
+/** Set while a step is retried because the server did not answer. */
+const retrying = ref<RetryNotice | null>(null);
+
+/** localStorage key of the Run now in flight, so a closed tab can be reopened onto it. */
+const RUN_KEY = 'migratekit-schedule-run';
+
+interface SavedRun {
+	scheduleId: string;
+	jobId: string;
+}
+
+function savedRun(): SavedRun | null {
+	try {
+		const raw = window.localStorage.getItem(RUN_KEY);
+
+		return raw ? (JSON.parse(raw) as SavedRun) : null;
+	} catch {
+		return null;
+	}
+}
+
+function rememberRun(scheduleId: string, jobId: string): void {
+	window.localStorage.setItem(RUN_KEY, JSON.stringify({ scheduleId, jobId }));
+}
+
+function forgetRun(): void {
+	window.localStorage.removeItem(RUN_KEY);
+}
 
 function blank(): Schedule {
 	return {
@@ -185,34 +225,21 @@ async function remove(schedule: Schedule): Promise<void> {
 	}
 }
 
-async function runNow(schedule: Schedule): Promise<void> {
-	if (activeRun.value) {
+/**
+ * Record how a Run now ended. A job that started is closed out through the
+ * server, so the schedule history and the notification email stay truthful.
+ */
+async function settle(schedule: Schedule, jobId: string, failure?: unknown): Promise<void> {
+	if (jobId === '') {
+		error.value = failure instanceof Error ? failure.message : 'The backup failed.';
 		return;
 	}
 
-	activeRun.value = { name: schedule.name };
-	runJobState.value = null;
-	error.value = '';
-	notice.value = `"${schedule.name}" is running now — keep this tab open until the progress bar completes.`;
-
-	let jobId = '';
-
 	try {
-		const state = await runJob(
-			post<JobState>('migratekit_schedule_start', { id: schedule.id }),
-			'migratekit_export_step',
-			(current) => {
-				runJobState.value = current;
-			},
-		);
-
-		jobId = state.id;
-
 		const result = await post<{ status: string }>('migratekit_schedule_finish', {
 			id: schedule.id,
-			job_id: state.id,
+			job_id: jobId,
 		});
-
 		const status = result.status.replace(/^(Success|Failed):\s*/, '');
 
 		if (result.status.startsWith('Failed')) {
@@ -220,36 +247,97 @@ async function runNow(schedule: Schedule): Promise<void> {
 		} else {
 			notice.value = `Backup finished: ${status}`;
 		}
-	} catch (caught) {
-		const message = caught instanceof Error ? caught.message : 'The backup failed.';
+	} catch (recordError) {
+		const extra = recordError instanceof Error ? recordError.message : '';
+		const message = failure instanceof Error ? failure.message : 'The backup failed.';
 
-		// The job started but did not run through: record the failure so the
-		// schedule history and the notification email stay truthful.
-		if (jobId !== '') {
-			try {
-				const result = await post<{ status: string }>('migratekit_schedule_finish', {
-					id: schedule.id,
-					job_id: jobId,
-				});
+		error.value = extra === '' ? message : `${message} (${extra})`;
+	}
+}
 
-				error.value = result.status.startsWith('Failed')
-					? `The backup failed: ${result.status.replace(/^Failed:\s*/, '')}`
-					: `The backup failed: ${message}`;
-			} catch (recordError) {
-				const extra = recordError instanceof Error ? recordError.message : '';
-				error.value = extra === '' ? message : `${message} (${extra})`;
-			}
+/** Drive a schedule's export job to the end, then record the outcome. Never throws. */
+async function drive(schedule: Schedule, start: JobState | Promise<JobState>): Promise<void> {
+	activeRun.value = { name: schedule.name };
+	runJobState.value = null;
+	retrying.value = null;
+
+	let jobId = '';
+
+	const track = (current: JobState): void => {
+		runJobState.value = current;
+		jobId = current.id;
+		rememberRun(schedule.id, current.id);
+	};
+
+	const trackRetry = (notice: RetryNotice): void => {
+		retrying.value = notice;
+	};
+
+	try {
+		if (start instanceof Promise) {
+			await runJob(start, 'migratekit_export_step', track, undefined, trackRetry);
 		} else {
-			error.value = message;
+			await driveJob(start, 'migratekit_export_step', track, undefined, trackRetry);
 		}
+
+		await settle(schedule, jobId);
+	} catch (caught) {
+		await settle(schedule, jobId, caught);
 	} finally {
+		forgetRun();
 		runJobState.value = null;
+		retrying.value = null;
 		activeRun.value = null;
 		await load();
 	}
 }
 
-onMounted(load);
+async function runNow(schedule: Schedule): Promise<void> {
+	if (activeRun.value) {
+		return;
+	}
+
+	error.value = '';
+	notice.value = `"${schedule.name}" is running now. You can leave this page — it resumes when you return.`;
+
+	await drive(schedule, post<JobState>('migratekit_schedule_start', { id: schedule.id }));
+}
+
+/** After a reload, pick the Run now that a closed tab left behind back up. */
+async function resumeRun(): Promise<void> {
+	if (activeRun.value) {
+		return;
+	}
+
+	const saved = savedRun();
+
+	if (saved === null || !saved.jobId) {
+		return;
+	}
+
+	const schedule = schedules.value.find((item) => item.id === saved.scheduleId);
+
+	if (schedule === undefined) {
+		forgetRun();
+		return;
+	}
+
+	try {
+		const state = await post<JobState>('migratekit_status', { job_id: saved.jobId });
+
+		notice.value = `"${schedule.name}" is resuming — it continues from where it stopped.`;
+
+		await drive(schedule, state);
+	} catch {
+		// The job is gone (cancelled or cleaned up on the server), so there is nothing to reconnect to.
+		forgetRun();
+	}
+}
+
+onMounted(async () => {
+	await load();
+	await resumeRun();
+});
 
 /** "in 2h 5m", "Due now", "Paused", "Not armed". */
 function nextRunLabel(schedule: Schedule): string {
@@ -313,6 +401,11 @@ function scheduleWarning(schedule: Schedule): string {
 				<span>{{ runJobState?.percent ?? 0 }}%</span>
 			</div>
 		</div>
+
+		<p v-if="retrying" class="mk-warn" role="status">
+			The server did not answer ({{ retrying.message }}). Retrying in {{ retrying.delaySeconds }}s — attempt
+			{{ retrying.attempt }}. Nothing is lost: the backup continues from where it stopped.
+		</p>
 
 		<div v-if="editing" class="mk-editor">
 			<h3>{{ editing.id ? 'Edit schedule' : 'New schedule' }}</h3>

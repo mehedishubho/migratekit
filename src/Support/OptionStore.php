@@ -33,15 +33,16 @@ final class OptionStore {
 	/**
 	 * @param string $key   Option name.
 	 * @param mixed  $value Value stored without autoloading.
-	 * @return void
+	 * @return bool False when WordPress could not store it.
 	 */
-	public static function put(string $key, $value): void {
+	public static function put(string $key, $value): bool {
 		if (function_exists('update_option')) {
-			update_option($key, $value, false);
-			return;
+			return update_option($key, $value, false);
 		}
 
 		self::$memory[ $key ] = $value;
+
+		return true;
 	}
 
 	/**

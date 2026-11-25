@@ -31,7 +31,7 @@ final class Activation {
 	}
 
 	/**
-	 * Clear scheduled events.
+	 * Clear scheduled events and drop any run in flight, which nothing would continue.
 	 *
 	 * @return void
 	 */
@@ -39,5 +39,6 @@ final class Activation {
 		wp_unschedule_hook(Cron::HOOK);
 		wp_unschedule_hook(Cron::SYNC_HOOK);
 		wp_clear_scheduled_hook('migratekit_storage_cleanup');
+		Cron::abandon_runs();
 	}
 }

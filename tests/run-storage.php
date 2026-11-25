@@ -88,6 +88,30 @@ check_st('rejects short id', ! JobId::is_valid('abc'));
 check_st('rejects non-hex id', ! JobId::is_valid('zzzzzzzzzzzzzzzz'));
 check_st('accepts 13-40 hex', JobId::is_valid(str_repeat('a', 40)));
 
+echo "\n[4] Job log\n";
+$log_dir = sys_get_temp_dir() . '/mk-log-' . bin2hex(random_bytes(4));
+mkdir($log_dir, 0777, true);
+
+$job = array( 'storage_dir' => $log_dir );
+
+// A site with very many files reports on each one; the log must not grow with them.
+for ( $i = 1; $i <= 2000; $i++ ) {
+	\MigrateKit\Job\Logger::append( $job, 'Archiving media (' . $i . '/2000 files, 1 MB of 2 MB)' );
+}
+
+\MigrateKit\Job\Logger::append( $job, 'Skipped uploads/a.jpg: it no longer exists.' );
+\MigrateKit\Job\Logger::append( $job, 'Skipped uploads/b.jpg: it no longer exists.' );
+\MigrateKit\Job\Logger::append( $job, 'Added the database to the archive' );
+
+$log_lines = is_file( $log_dir . '/job.log' ) ? count( file( $log_dir . '/job.log' ) ) : 0;
+
+same_st( 'progress of one kind is logged once', 1, substr_count( (string) file_get_contents( $log_dir . '/job.log' ), 'Archiving media' ) );
+same_st( 'distinct events are all logged', 4, $log_lines );
+check_st( 'log lines are stamped', strpos( (string) file_get_contents( $log_dir . '/job.log' ), '] Archiving media (1/2000' ) !== false );
+
+unlink( $log_dir . '/job.log' );
+rmdir( $log_dir );
+
 echo "\n";
 echo "passed: {$GLOBALS['st_pass']}, failed: {$GLOBALS['st_fail']}\n";
 exit($GLOBALS['st_fail'] === 0 ? 0 : 1);

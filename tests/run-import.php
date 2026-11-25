@@ -71,8 +71,14 @@ final class ImportFakeDriver implements DriverInterface {
 	public function query(string $sql) {
 		$this->statements[] = $sql;
 
-		if (preg_match('/^SELECT \* FROM `([^`]+)`/iu', trim($sql), $match) === 1) {
+		if (preg_match('/^SELECT \* FROM `([^`]+)`(.*)$/iu', trim($sql), $match) === 1) {
 			$rows = isset($this->tables[ $match[1] ]['rows']) ? $this->tables[ $match[1] ]['rows'] : array();
+
+			// The dumper pages through rows; honour the page it asked for.
+			if (preg_match('/\bLIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?$/i', $match[2], $limit) === 1) {
+				$rows = array_slice($rows, isset($limit[2]) && $limit[2] !== '' ? (int) $limit[2] : 0, (int) $limit[1]);
+			}
+
 			return new ImportResult($rows);
 		}
 

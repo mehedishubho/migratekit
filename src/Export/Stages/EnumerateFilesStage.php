@@ -1,6 +1,6 @@
 <?php
 /**
- * Enumerates files under a source directory into a manifest.
+ * Lists files under a source directory into an on-disk manifest, resuming across requests.
  *
  * @package MigrateKit
  */
@@ -9,8 +9,10 @@ declare(strict_types=1);
 
 namespace MigrateKit\Export\Stages;
 
+use MigrateKit\Export\Manifest;
 use MigrateKit\Pipeline\PipelineContext;
 use MigrateKit\Pipeline\StageInterface;
+use MigrateKit\Support\Bytes;
 
 final class EnumerateFilesStage implements StageInterface {
 
@@ -38,15 +40,19 @@ final class EnumerateFilesStage implements StageInterface {
 	/** @var string Active-root basis: "plugins" or "themes" (empty disables). */
 	private $active_kind;
 
+	/** @var string[] Absolute directories skipped wherever they sit under the root. */
+	private $exclude_paths;
+
 	/**
-	 * @param string   $manifest_key State manifest key.
-	 * @param string   $path_key     State path key holding the source root.
-	 * @param string   $prefix       Archive path prefix ("" for the content root).
-	 * @param string[] $exclude_dirs Directory names to skip at any depth.
-	 * @param string[] $exclude_names File names to skip.
-	 * @param string   $skip_option  Option that disables this stage entirely.
+	 * @param string   $manifest_key       State key for this manifest's scan progress.
+	 * @param string   $path_key           State path key holding the source root.
+	 * @param string   $prefix             Archive path prefix ("" for the content root).
+	 * @param string[] $exclude_dirs       Directory names to skip at any depth.
+	 * @param string[] $exclude_names      File names to skip.
+	 * @param string   $skip_option        Option that disables this stage entirely.
 	 * @param string   $active_only_option Option that keeps only active roots.
 	 * @param string   $active_kind        Active-root basis ("plugins"/"themes").
+	 * @param string[] $exclude_paths      Absolute directories to skip wherever they sit.
 	 */
 	public function __construct(
 		string $manifest_key,
@@ -56,7 +62,8 @@ final class EnumerateFilesStage implements StageInterface {
 		array $exclude_names = array(),
 		string $skip_option = '',
 		string $active_only_option = '',
-		string $active_kind = ''
+		string $active_kind = '',
+		array $exclude_paths = array()
 	) {
 		$this->manifest_key       = $manifest_key;
 		$this->path_key           = $path_key;
@@ -66,28 +73,78 @@ final class EnumerateFilesStage implements StageInterface {
 		$this->skip_option        = $skip_option;
 		$this->active_only_option = $active_only_option;
 		$this->active_kind        = $active_kind;
+		$this->exclude_paths      = array_map(
+			static function (string $path): string {
+				return str_replace('\\', '/', rtrim($path, '/\\'));
+			},
+			$exclude_paths
+		);
 	}
 
 	public function run(array &$state, PipelineContext $ctx): bool {
-		if (isset($state['manifests'][ $this->manifest_key ])) {
+		$scan = isset($state['scans'][ $this->manifest_key ]) && is_array($state['scans'][ $this->manifest_key ])
+			? $state['scans'][ $this->manifest_key ]
+			: null;
+
+		if ($scan !== null && ! empty($scan['done'])) {
 			return true;
 		}
 
-		if ($this->skip_option !== '' && ! empty($state['options'][ $this->skip_option ])) {
-			$state['manifests'][ $this->manifest_key ] = array();
-			$state['cursors'][ $this->manifest_key ]   = array(
-				'index'   => 0,
-				'offset'  => 0,
-				'written' => 0,
-				'header'  => null,
+		$storage = isset($state['storage_dir']) ? rtrim((string) $state['storage_dir'], '/\\') : '';
+		$root    = rtrim((string) ( $state['paths'][ $this->path_key ] ?? '' ), '/\\');
+		$skip    = ( $this->skip_option !== '' && ! empty($state['options'][ $this->skip_option ] ) )
+			|| $root === ''
+			|| ! is_dir($root);
+
+		$fresh = $scan === null;
+
+		if ($fresh) {
+			$scan = array(
+				'dir_offset' => 0,
+				'dir_bytes'  => 0,
+				'list_bytes' => 0,
+				'files'      => 0,
+				'bytes'      => 0,
+				'done'       => false,
 			);
 
+			$state['scans'][ $this->manifest_key ] = $scan;
+		}
+
+		if ($skip) {
+			$scan['done'] = true;
+			$state['scans'][ $this->manifest_key ] = $scan;
+
+			$ctx->report(sprintf('Found 0 files for %s', $this->manifest_key));
+
 			return true;
 		}
 
-		$root          = rtrim((string) ($state['paths'][ $this->path_key ] ?? ''), '/\\');
-		$files         = array();
-		$exclude_dirs  = $this->exclude_dirs;
+		if ($storage === '') {
+			throw new \RuntimeException('Export state is missing storage_dir.');
+		}
+
+		$list  = @fopen(Manifest::path($storage, $this->manifest_key), 'c+b');
+		$queue = @fopen(Manifest::queue_path($storage, $this->manifest_key), 'c+b');
+
+		if ($list === false || $queue === false) {
+			throw new \RuntimeException('Unable to write the file list for ' . $this->manifest_key . '.');
+		}
+
+		if ($fresh) {
+			ftruncate($list, 0);
+			ftruncate($queue, 0);
+
+			Manifest::append($queue, $root);
+
+			$scan['dir_bytes'] = (int) ftell($queue);
+		} else {
+			// A request killed mid-scan appends entries its state never recorded; drop them.
+			self::trim($list, (int) $scan['list_bytes']);
+			self::trim($queue, (int) $scan['dir_bytes']);
+		}
+
+		$exclude_dirs = $this->exclude_dirs;
 
 		if ($this->manifest_key === 'content') {
 			if (! empty($state['options']['no_cache'])) {
@@ -99,34 +156,47 @@ final class EnumerateFilesStage implements StageInterface {
 			}
 		}
 
-		if ($root !== '' && is_dir($root)) {
-			$this->walk($root, $files, $exclude_dirs);
+		$roots = $this->active_only_option !== '' && ! empty($state['options'][ $this->active_only_option ])
+			? self::active_roots($this->active_kind, $ctx)
+			: null;
+
+		$deadline = $ctx->deadline();
+
+		while (true) {
+			// scan() appends to the queue, so the next pending directory is always sought by position.
+			fseek($queue, (int) $scan['dir_offset']);
+
+			$directory = Manifest::read($queue);
+
+			if ($directory === null) {
+				$scan['done'] = true;
+				break;
+			}
+
+			$scan['dir_offset'] = (int) ftell($queue);
+
+			$this->scan($root, $directory['path'], $queue, $list, $exclude_dirs, $roots, $scan);
+
+			if ($deadline !== null && microtime(true) >= $deadline) {
+				break;
+			}
 		}
 
-		if ($this->active_only_option !== '' && ! empty($state['options'][ $this->active_only_option ])) {
-			$roots = self::active_roots($this->active_kind, $ctx);
-			$files = array_values(
-				array_filter(
-					$files,
-					static function (string $file) use ($root, $roots): bool {
-						return in_array(substr($file, strlen($root) + 1), $roots, true)
-							|| in_array(strtok(substr($file, strlen($root) + 1), '/\\'), $roots, true);
-					}
-				)
-			);
-		}
+		fseek($queue, 0, SEEK_END);
 
-		$state['manifests'][ $this->manifest_key ] = $files;
-		$state['cursors'][ $this->manifest_key ]   = array(
-			'index'   => 0,
-			'offset'  => 0,
-			'written' => 0,
-			'header'  => null,
+		$scan['dir_bytes']  = (int) ftell($queue);
+		$scan['list_bytes'] = (int) ftell($list);
+
+		fclose($list);
+		fclose($queue);
+
+		$state['scans'][ $this->manifest_key ] = $scan;
+
+		$ctx->report(
+			sprintf('Found %d files for %s (%s)', $scan['files'], $this->manifest_key, Bytes::format((int) $scan['bytes']))
 		);
 
-		$ctx->report(sprintf('Found %d files for %s', count($files), $this->manifest_key));
-
-		return true;
+		return ! empty($scan['done']);
 	}
 
 	/**
@@ -148,7 +218,7 @@ final class EnumerateFilesStage implements StageInterface {
 					? preg_replace('#[/\\\\].*$#', '', $source)
 					: $source;
 
-				if ($root !== '') {
+				if ($root !== '' && $root !== null) {
 					$roots[] = $root;
 				}
 			}
@@ -157,14 +227,14 @@ final class EnumerateFilesStage implements StageInterface {
 				$source = (string) $plugin;
 				$root   = preg_replace('#[/\\\\].*$#', '', $source);
 
-				if ($root !== '' && $root !== $source) {
+				if ($root !== '' && $root !== null && $root !== $source) {
 					$roots[] = $root;
 				}
 			}
 		}
 
 		if ($kind === 'themes') {
-			foreach (array( 'template', 'stylesheet' ) as $key) {
+			foreach ( array( 'template', 'stylesheet' ) as $key) {
 				$root = (string) $ctx->site->get($key, '');
 
 				if ($root !== '') {
@@ -177,17 +247,40 @@ final class EnumerateFilesStage implements StageInterface {
 	}
 
 	/**
-	 * @param string   $dir          Directory to walk.
-	 * @param string[] $files        Collected absolute paths (by reference).
-	 * @param string[] $exclude_dirs Directory names to skip.
+	 * Whether a path belongs to one of the active roots: it is one itself, or
+	 * its first segment under the source root is.
+	 *
+	 * @param string   $root     Source root.
+	 * @param string   $absolute Absolute path.
+	 * @param string[] $roots    Active roots.
+	 * @return bool
+	 */
+	private static function is_active(string $root, string $absolute, array $roots): bool {
+		$relative = substr($absolute, strlen($root) + 1);
+
+		return in_array($relative, $roots, true) || in_array(strtok($relative, '/\\'), $roots, true);
+	}
+
+	/**
+	 * List the files of one directory and queue its subdirectories.
+	 *
+	 * @param string      $root         Source root.
+	 * @param string      $dir          Directory to scan.
+	 * @param resource    $queue        Directory queue stream.
+	 * @param resource    $list         Manifest stream.
+	 * @param string[]    $exclude_dirs Directory names to skip.
+	 * @param string[]|null $roots      Active roots, or null when everything is included.
+	 * @param array       $scan         Scan progress (by reference).
 	 * @return void
 	 */
-	private function walk(string $dir, array &$files, array $exclude_dirs): void {
+	private function scan(string $root, string $dir, $queue, $list, array $exclude_dirs, ?array $roots, array &$scan): void {
 		$items = @scandir($dir);
 
 		if ($items === false) {
 			return;
 		}
+
+		$subdirs = array();
 
 		foreach ($items as $item) {
 			if ($item === '.' || $item === '..') {
@@ -197,11 +290,19 @@ final class EnumerateFilesStage implements StageInterface {
 			$absolute = $dir . DIRECTORY_SEPARATOR . $item;
 
 			if (is_dir($absolute)) {
-				if (is_link($absolute) || in_array($item, $exclude_dirs, true)) {
+				if (
+					is_link($absolute)
+					|| self::excluded($item, $exclude_dirs)
+					|| in_array(str_replace('\\', '/', $absolute), $this->exclude_paths, true)
+				) {
 					continue;
 				}
 
-				$this->walk($absolute, $files, $exclude_dirs);
+				if ($roots !== null && ! self::is_active($root, $absolute, $roots)) {
+					continue;
+				}
+
+				$subdirs[] = $absolute;
 				continue;
 			}
 
@@ -209,7 +310,63 @@ final class EnumerateFilesStage implements StageInterface {
 				continue;
 			}
 
-			$files[] = $absolute;
+			if ($roots !== null && ! self::is_active($root, $absolute, $roots)) {
+				continue;
+			}
+
+			$size = (int) @filesize($absolute);
+
+			Manifest::append($list, substr($absolute, strlen($root) + 1), $size);
+
+			++$scan['files'];
+			$scan['bytes'] += $size;
 		}
+
+		fseek($queue, 0, SEEK_END);
+
+		foreach ($subdirs as $subdir) {
+			Manifest::append($queue, $subdir);
+		}
+	}
+
+	/**
+	 * Whether a directory name is excluded: an exact match, or a match on a
+	 * pattern's literal part when the pattern ends in "*".
+	 *
+	 * @param string   $name         Directory name.
+	 * @param string[] $exclude_dirs Names and name patterns to skip.
+	 * @return bool
+	 */
+	private static function excluded(string $name, array $exclude_dirs): bool {
+		foreach ($exclude_dirs as $excluded) {
+			$excluded = (string) $excluded;
+
+			if ($excluded === $name) {
+				return true;
+			}
+
+			if (substr($excluded, -1) === '*' && strpos($name, substr($excluded, 0, -1)) === 0) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Cut a stream back to a recorded length.
+	 *
+	 * @param resource $handle Stream.
+	 * @param int      $length Length to keep.
+	 * @return void
+	 */
+	private static function trim($handle, int $length): void {
+		fseek($handle, 0, SEEK_END);
+
+		if (ftell($handle) > $length) {
+			ftruncate($handle, $length);
+		}
+
+		fseek($handle, $length);
 	}
 }

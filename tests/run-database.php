@@ -59,9 +59,14 @@ final class FakeResult {
 
 /**
  * In-memory driver used by the dumper/importer tests.
+ *
+ * A table is its columns and rows, plus optionally `key` (primary key columns)
+ * with `numeric` flags. A keyed table answers the key lookups the dumper asks
+ * for and is paged by key the way a real server pages it; `stuck` makes the key
+ * condition never advance.
  */
 final class FakeDriver implements DriverInterface {
-	/** @var array<string,array{columns:string[],rows:array<int,array<string,mixed>>}> */
+	/** @var array<string,array{columns:string[],rows:array<int,array<string,mixed>>,key?:string[],numeric?:bool[],stuck?:bool}> */
 	public $tables = array();
 
 	/** @var string[] */
@@ -69,6 +74,12 @@ final class FakeDriver implements DriverInterface {
 
 	/** @var string|null */
 	public $fail_contains = null;
+
+	/** @var bool */
+	public $fail_listing = false;
+
+	/** @var string[] Tables whose structure lookup fails. */
+	public $fail_structure = array();
 
 	/** @var int */
 	private $last_errno = 0;
@@ -80,45 +91,192 @@ final class FakeDriver implements DriverInterface {
 		$this->statements[] = $sql;
 
 		if ($this->fail_contains !== null && strpos($sql, $this->fail_contains) !== false) {
-			$this->last_errno = 1064;
-			$this->last_error = 'synthetic failure';
-			return false;
+			return $this->failed();
 		}
 
 		$this->last_errno = 0;
 		$this->last_error = '';
 
-		if (preg_match('/^SELECT \* FROM `([^`]+)`(.*)$/iu', trim($sql), $match) === 1) {
-			$table = $match[1];
-			$where = $match[2];
-			$rows  = isset($this->tables[ $table ]['rows']) ? $this->tables[ $table ]['rows'] : array();
+		if (preg_match('/^SHOW KEYS FROM `([^`]+)`/', $sql, $match) === 1) {
+			$rows = array();
 
-			if (stripos($where, 'post_type') !== false) {
-				$rows = array_values(
-					array_filter(
-						$rows,
-						static function (array $row): bool {
-							return ! isset($row['post_type']) || $row['post_type'] !== 'revision';
-						}
-					)
-				);
+			foreach ($this->key_of($match[1]) as $index => $column) {
+				$rows[] = array( 'Key_name' => 'PRIMARY', 'Seq_in_index' => $index + 1, 'Column_name' => $column );
 			}
 
-			if (stripos($where, 'comment_approved') !== false) {
-				$rows = array_values(
-					array_filter(
-						$rows,
-						static function (array $row): bool {
-							return ! isset($row['comment_approved']) || $row['comment_approved'] !== 'spam';
-						}
-					)
+			return new FakeResult($rows);
+		}
+
+		if (preg_match('/^SHOW COLUMNS FROM `([^`]+)`/', $sql, $match) === 1) {
+			$rows  = array();
+			$table = $match[1];
+
+			foreach ($this->tables[ $table ]['columns'] as $column) {
+				$numeric = array_search($column, $this->key_of($table), true);
+				$rows[]  = array(
+					'Field' => $column,
+					'Type'  => $numeric !== false && ! empty($this->tables[ $table ]['numeric'][ $numeric ] ) ? 'bigint' : 'varchar(255)',
 				);
 			}
 
 			return new FakeResult($rows);
 		}
 
+		if (preg_match('/^SELECT \* FROM `([^`]+)`(.*)$/iu', trim($sql), $match) === 1) {
+			return new FakeResult($this->page($match[1], $match[2]));
+		}
+
 		return true;
+	}
+
+	/**
+	 * The rows one row query returns.
+	 *
+	 * @param string $table Table name.
+	 * @param string $rest  SQL after the table name.
+	 * @return array<int,array<string,mixed>>
+	 */
+	private function page(string $table, string $rest): array {
+		$definition = $this->tables[ $table ] ?? array( 'rows' => array() );
+		$rows       = $definition['rows'];
+		$where      = preg_match('/\bWHERE\s+(.*?)\s+(?:ORDER BY|LIMIT)\b/is', $rest, $match) === 1 ? $match[1] : '';
+
+		// The key condition is the last top-level term, after any row filter.
+		if (! empty($definition['stuck']) && $where !== '') {
+			$cut   = strrpos($where, ' AND ( ' );
+			$where = $cut === false ? '' : substr($where, 0, $cut);
+		}
+
+		if ($where !== '') {
+			$rows = array_values(
+				array_filter(
+					$rows,
+					fn( array $row ): bool => $this->matches($row, $where)
+				)
+			);
+		}
+
+		$key = $this->key_of($table);
+
+		if ($key !== array()) {
+			$numeric = $definition['numeric'] ?? array();
+
+			usort(
+				$rows,
+				static function (array $a, array $b) use ($key, $numeric): int {
+					foreach ($key as $index => $column) {
+						$order = ! empty($numeric[ $index ] )
+							? (float) $a[ $column ] <=> (float) $b[ $column ]
+							: strcmp((string) $a[ $column ], (string) $b[ $column ]);
+
+						if ($order !== 0) {
+							return $order;
+						}
+					}
+
+					return 0;
+				}
+			);
+		}
+
+		if (preg_match('/\bLIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?$/i', $rest, $limit) === 1) {
+			$rows = array_slice($rows, isset($limit[2]) && $limit[2] !== '' ? (int) $limit[2] : 0, (int) $limit[1]);
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Evaluate the WHERE clause the dumper builds: comparisons joined by AND and OR inside parentheses.
+	 *
+	 * @param array<string,mixed> $row   Candidate row.
+	 * @param string              $where Bare SQL condition.
+	 * @return bool
+	 */
+	private function matches(array $row, string $where): bool {
+		preg_match_all('/\(|\)|`[^`]+`|<>|>|=|\'(?:[^\'\\\\]|\\\\.)*\'|[^\s()]+/', $where, $match);
+
+		$tokens = $match[0];
+		$at     = 0;
+		$peek   = static function () use ($tokens, &$at) {
+			return $tokens[ $at ] ?? null;
+		};
+		$atom = $term = $expr = null;
+
+		$atom = static function (array $row) use (&$atom, &$expr, $peek, &$at, $tokens): bool {
+			if ($peek() === '(') {
+				++$at;
+				$value = $expr($row);
+				++$at;
+
+				return $value;
+			}
+
+			$column   = trim((string) $tokens[ $at++ ], '`');
+			$operator = (string) $tokens[ $at++ ];
+			$literal  = (string) $tokens[ $at++ ];
+			$number   = $literal[0] !== "'";
+			$left     = $row[ $column ] ?? '';
+			$order    = $number
+				? (float) $left <=> (float) $literal
+				: strcmp((string) $left, LiteralRewriter::unescape(substr($literal, 1, -1)));
+
+			if ($operator === '>') {
+				return $order > 0;
+			}
+
+			return $operator === '<>' ? $order !== 0 : $order === 0;
+		};
+
+		$term = static function (array $row) use (&$term, $atom, $peek, &$at): bool {
+			$value = $atom($row);
+
+			while ($peek() === 'AND') {
+				++$at;
+				$value = $atom($row) && $value;
+			}
+
+			return $value;
+		};
+
+		$expr = static function (array $row) use (&$expr, $term, $peek, &$at): bool {
+			$value = $term($row);
+
+			while ($peek() === 'OR') {
+				++$at;
+				$value = $term($row) || $value;
+			}
+
+			return $value;
+		};
+
+		return $expr($row);
+	}
+
+	/**
+	 * @param string $table Table name.
+	 * @return string[]
+	 */
+	private function key_of(string $table): array {
+		return $this->tables[ $table ]['key'] ?? array();
+	}
+
+	/**
+	 * @return false
+	 */
+	private function failed() {
+		$this->last_errno = 1064;
+		$this->last_error = 'synthetic failure';
+
+		return false;
+	}
+
+	/**
+	 * Like the real driver, a lookup that succeeds clears the last error.
+	 */
+	private function answered(): void {
+		$this->last_errno = 0;
+		$this->last_error = '';
 	}
 
 	public function fetch_assoc($result): ?array {
@@ -153,10 +311,26 @@ final class FakeDriver implements DriverInterface {
 	}
 
 	public function list_tables(): array {
+		if ($this->fail_listing) {
+			$this->failed();
+
+			return array();
+		}
+
+		$this->answered();
+
 		return array_keys($this->tables);
 	}
 
 	public function show_create_table(string $table): ?string {
+		if (in_array($table, $this->fail_structure, true)) {
+			$this->failed();
+
+			return null;
+		}
+
+		$this->answered();
+
 		return 'CREATE TABLE `' . $table . "` (\n  `id` int NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 	}
 
@@ -353,6 +527,332 @@ $dumper->dump(
 );
 check_db('included-only dump has options', strpos($included_output, 'SERVMASK_PREFIX_options') !== false);
 check_db('included-only dump omits posts', strpos($included_output, 'SERVMASK_PREFIX_posts') === false);
+
+// Slicing the dump across requests yields the same SQL as one pass.
+$sliced       = '';
+$slice_cursor = array();
+$slice_guard  = 0;
+
+do {
+	$sliced_db       = new FakeDriver();
+	$sliced_db->tables = $db->tables;
+
+	// An already-expired deadline writes about one page of rows per request.
+	$slice_finished = (new Dumper($sliced_db, 'wp_', 'SERVMASK_PREFIX_'))->dump_chunk(
+		$slice_cursor,
+		static function (string $chunk) use (&$sliced): void {
+			$sliced .= $chunk;
+		},
+		array(
+			'no_post_revisions' => true,
+			'no_spam_comments'  => true,
+			'excluded_tables'   => array( 'other_table' ),
+		),
+		microtime(true)
+	);
+} while ( ! $slice_finished && ++$slice_guard < 200 );
+
+check_db('sliced dump finishes', $slice_finished);
+check_db('sliced dump needed several requests', $slice_guard >= 2);
+same_db('sliced dump matches one pass', $output, $sliced);
+
+// ---------------------------------------------------------------------------
+echo "\n[6b] Row paging by key\n";
+
+/**
+ * Rows of every INSERT into one table, in dump order: one array of rows per statement.
+ */
+function db_inserts(string $dump, string $mapped): array {
+	preg_match_all('/^INSERT INTO `' . $mapped . '` \([^)]+\) VALUES (.+);$/m', $dump, $statements);
+
+	$inserts = array();
+
+	foreach ($statements[1] as $values) {
+		$rows = array();
+
+		foreach (explode('),(', substr($values, 1, -1)) as $tuple) {
+			$rows[] = db_cells($tuple);
+		}
+
+		$inserts[] = $rows;
+	}
+
+	return $inserts;
+}
+
+/**
+ * Cell values of one tuple, read left to right so a very long value cannot exhaust the regex engine.
+ *
+ * @param string $tuple "(v1,v2,…)" with the outer parentheses removed.
+ * @return array<int,string|null>
+ */
+function db_cells(string $tuple): array {
+	$cells  = array();
+	$cell   = '';
+	$quoted = false;
+
+	for ( $i = 0, $length = strlen( $tuple ); $i < $length; $i++ ) {
+		$char = $tuple[ $i ];
+
+		if ($quoted) {
+			if ( $char === '\\' && $i + 1 < $length ) {
+				$cell .= $char . $tuple[ ++$i ];
+			} elseif ($char === "'") {
+				$quoted  = false;
+				$cells[] = LiteralRewriter::unescape( $cell );
+				$cell    = '';
+			} else {
+				$cell .= $char;
+			}
+		} elseif ($char === "'") {
+			$quoted = true;
+		} elseif (substr($tuple, $i, 4) === 'NULL') {
+			$cells[] = null;
+			$i      += 3;
+		}
+	}
+
+	return $cells;
+}
+
+function db_rows(array $inserts): array {
+	$rows = array();
+
+	foreach ($inserts as $statement) {
+		foreach ($statement as $row) {
+			$rows[] = $row;
+		}
+	}
+
+	return $rows;
+}
+
+/**
+ * Compare two row lists without printing them when they differ.
+ */
+function same_rows_db(string $label, array $expected, array $actual): void {
+	$same = $expected === $actual;
+	$at   = 0;
+
+	while (! $same && isset($expected[ $at ] ) && $expected[ $at ] === ( $actual[ $at ] ?? null )) {
+		++$at;
+	}
+
+	if ($same) {
+		$GLOBALS['db_pass']++;
+		echo "  ok  - {$label}\n";
+	} else {
+		$GLOBALS['db_fail']++;
+		echo "FAIL  - {$label}\n";
+		printf( "        expected %d rows, got %d; first difference at row %d\n", count( $expected ), count( $actual ), $at );
+	}
+}
+
+/**
+ * The message a dump fails with, or '' when it does not.
+ */
+function db_dump_error(FakeDriver $driver): string {
+	try {
+		(new Dumper($driver, 'wp_', 'SERVMASK_PREFIX_'))->dump(static function (): void {}, array());
+	} catch (\RuntimeException $e) {
+		return $e->getMessage();
+	}
+
+	return '';
+}
+
+$paged = new FakeDriver();
+
+// 5,000 rows stored out of order, every 700th one too large to share a page with many others.
+$big = array();
+
+for ($i = 1; $i <= 5000; $i++) {
+	$big[] = array( 'ID' => $i, 'body' => $i % 700 === 0 ? str_repeat('w', 300000) : str_repeat('x', 40) );
+}
+
+shuffle($big);
+
+$slugs = array( "o'brien", 'back\\slash', 'sp ace', 'ünïcødé', '0', '1e3', '-1', '(paren)', 'AND', "it''s", "two\nlines", '0x1A', ' 1', '1 ', 'a' );
+$pairs = array();
+
+foreach ( array( 2, 10, 1 ) as $blog ) {
+	foreach ($slugs as $slug) {
+		$pairs[] = array( 'blog_id' => (string) $blog, 'slug' => $slug, 'title' => 'row ' . $blog . ' ' . $slug );
+	}
+}
+
+shuffle($pairs);
+
+$amounts = array( '0.00', '-3.25', '1.50', '10.00', '1000.00', '0.05' );
+$prices  = array();
+
+foreach ($amounts as $amount) {
+	$prices[] = array( 'amount' => $amount, 'label' => 'costs ' . $amount );
+}
+
+// Values that look like anything but text; as a text key each must compare as text.
+$tokens = array( '1', '01', '1e3', '0x1A', ' 1', '1 ', '+1', '-0', '1.0', 'a', 'A', '' );
+$notes  = array();
+
+foreach ($tokens as $token) {
+	$notes[] = array( 'token' => $token, 'note' => 'token ' . strlen($token) );
+}
+
+$paged->tables = array(
+	'wp_big'   => array( 'columns' => array( 'ID', 'body' ), 'rows' => $big, 'key' => array( 'ID' ), 'numeric' => array( true ) ),
+	'wp_pair'  => array(
+		'columns' => array( 'blog_id', 'slug', 'title' ),
+		'rows'    => $pairs,
+		'key'     => array( 'blog_id', 'slug' ),
+		'numeric' => array( true, false ),
+	),
+	'wp_price' => array( 'columns' => array( 'amount', 'label' ), 'rows' => $prices, 'key' => array( 'amount' ), 'numeric' => array( true ) ),
+	'wp_token' => array( 'columns' => array( 'token', 'note' ), 'rows' => $notes, 'key' => array( 'token' ), 'numeric' => array( false ) ),
+);
+
+$paged_output = '';
+$collect      = static function (string $chunk) use (&$paged_output): void {
+	$paged_output .= $chunk;
+};
+
+(new Dumper($paged, 'wp_', 'SERVMASK_PREFIX_'))->dump($collect, array());
+
+$big_inserts = db_inserts($paged_output, 'SERVMASK_PREFIX_big');
+
+same_rows_db('single-column key: every row exactly once, in key order', range(1, 5000), array_map('intval', array_column(db_rows($big_inserts), 0)));
+
+$sizes = array_map('count', $big_inserts);
+
+check_db('single-column key: no page exceeds the row cap', max($sizes) <= 1000);
+
+$after_wide = true;
+
+foreach ($big_inserts as $index => $rows) {
+	foreach ($rows as $row) {
+		if (strlen($row[1]) === 300000) {
+			$after_wide = $after_wide && isset($big_inserts[ $index + 1 ] ) && count($big_inserts[ $index + 1 ] ) <= 13;
+		}
+	}
+}
+
+check_db('single-column key: a wide row keeps the next page small', $after_wide);
+check_db('single-column key: a wide row was dumped', strpos($paged_output, str_repeat('w', 300000)) !== false);
+
+$big_queries = count(preg_grep('/^SELECT \* FROM `wp_big`/', $paged->statements));
+check_db('single-column key: 5,000 rows take a few dozen pages', $big_queries >= 15 && $big_queries <= 30);
+
+$by_pair = static function (array $a, array $b): int {
+	$blog = (int) $a['blog_id'] <=> (int) $b['blog_id'];
+
+	return $blog !== 0 ? $blog : strcmp($a['slug'], $b['slug']);
+};
+
+usort($pairs, $by_pair);
+same_rows_db('composite key: every row exactly once, in key order', array_map('array_values', $pairs), db_rows(db_inserts($paged_output, 'SERVMASK_PREFIX_pair')));
+
+usort($prices, static function (array $a, array $b): int { return (float) $a['amount'] <=> (float) $b['amount']; });
+same_rows_db('fractional numeric key: every row exactly once, in key order', array_map('array_values', $prices), db_rows(db_inserts($paged_output, 'SERVMASK_PREFIX_price')));
+
+usort($notes, static function (array $a, array $b): int { return strcmp($a['token'], $b['token']); });
+same_rows_db('text key: every row exactly once, in key order', array_map('array_values', $notes), db_rows(db_inserts($paged_output, 'SERVMASK_PREFIX_token')));
+
+// One page per request yields the same SQL as one pass.
+$keyed         = '';
+$keyed_cursor  = array();
+$keyed_guard   = 0;
+$keyed_collect = static function (string $chunk) use (&$keyed): void {
+	$keyed .= $chunk;
+};
+
+do {
+	$keyed_db         = new FakeDriver();
+	$keyed_db->tables = $paged->tables;
+
+	$keyed_done = (new Dumper($keyed_db, 'wp_', 'SERVMASK_PREFIX_'))->dump_chunk($keyed_cursor, $keyed_collect, array(), microtime(true));
+} while (! $keyed_done && ++$keyed_guard < 500);
+
+check_db('keyed dump sliced across requests finishes', $keyed_done);
+check_db('keyed dump sliced across requests needed many requests', $keyed_guard > 10);
+same_db('keyed dump sliced across requests matches one pass', $paged_output, $keyed);
+
+// A key whose condition never advances ends the table instead of looping forever.
+$loop        = new FakeDriver();
+$loop_chunks = 0;
+$loop->tables = array(
+	'wp_loop' => array(
+		'columns' => array( 'ID', 'body' ),
+		'rows'    => array(
+			array( 'ID' => 1, 'body' => 'one' ),
+			array( 'ID' => 2, 'body' => 'two' ),
+			array( 'ID' => 3, 'body' => 'three' ),
+			array( 'ID' => 4, 'body' => 'four' ),
+			array( 'ID' => 5, 'body' => 'five' ),
+		),
+		'key'     => array( 'ID' ),
+		'stuck'   => true,
+	),
+);
+
+(new Dumper($loop, 'wp_', 'SERVMASK_PREFIX_'))->dump(
+	static function () use (&$loop_chunks): void {
+		if (++$loop_chunks > 10) {
+			throw new \RuntimeException('paging never ended');
+		}
+	},
+	array()
+);
+
+check_db('a key that never advances ends the table', $loop_chunks <= 10);
+
+// ---------------------------------------------------------------------------
+echo "\n[6c] A database error never passes as an empty table\n";
+
+$broken = new FakeDriver();
+$broken->tables        = $paged->tables;
+$broken->fail_contains = 'SELECT * FROM `wp_big`';
+
+same_db('a failed row query fails the dump', 'Unable to read the rows of table `wp_big` — synthetic failure', db_dump_error($broken));
+
+$broken->fail_contains = null;
+$broken->fail_listing  = true;
+same_db('a failed table listing fails the dump', 'Unable to list the database tables — synthetic failure', db_dump_error($broken));
+
+$broken->fail_listing  = false;
+$broken->fail_structure = array( 'wp_big' );
+same_db('a failed structure lookup fails the dump', 'Unable to read the structure of table `wp_big` — synthetic failure', db_dump_error($broken));
+
+// The request that failed saved nothing for that page, so the next one reads it again.
+$broken->fail_structure = array();
+$broken->fail_contains  = 'SELECT * FROM `wp_big`';
+
+$resumed       = '';
+$resumed_cursor = array();
+$resumed_threw  = false;
+
+try {
+	(new Dumper($broken, 'wp_', 'SERVMASK_PREFIX_'))->dump_chunk(
+		$resumed_cursor,
+		static function (string $chunk) use (&$resumed): void {
+			$resumed .= $chunk;
+		},
+		array()
+	);
+} catch (\RuntimeException $e) {
+	$resumed_threw = true;
+}
+
+check_db('a failed page reaches the job as an error', $resumed_threw);
+
+$resumed_done = (new Dumper($paged, 'wp_', 'SERVMASK_PREFIX_'))->dump_chunk(
+	$resumed_cursor,
+	static function (string $chunk) use (&$resumed): void {
+		$resumed .= $chunk;
+	},
+	array()
+);
+
+check_db('the dump continues from the failed page', $resumed_done);
+same_db('resumed dump matches one pass', $paged_output, $resumed);
 
 // Export find/replace pairs rewrite row values while dumping.
 $replace_db        = new FakeDriver();

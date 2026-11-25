@@ -1,6 +1,17 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
-import { config, post, runJob, type JobState } from '../api';
+import { computed, onMounted, ref } from 'vue';
+import {
+	activeExportId,
+	ApiError,
+	config,
+	driveJob,
+	forgetExport,
+	post,
+	rememberExport,
+	runJob,
+	type JobState,
+	type RetryNotice,
+} from '../api';
 
 const compression = ref('');
 const password = ref('');
@@ -28,6 +39,15 @@ const job = ref<JobState | null>(null);
 const error = ref('');
 const done = ref(false);
 const showAdvanced = ref(false);
+
+/** Backup this page is driving; also kept in localStorage so a later page load can resume it. */
+const jobId = ref('');
+
+/** Whether a failed backup can still be picked up where it stopped. */
+const canResume = ref(false);
+
+/** Set while a step is retried because the server did not answer. */
+const retrying = ref<RetryNotice | null>(null);
 
 type Scope = { value: string; label: string };
 
@@ -80,6 +100,58 @@ function splitTables(input: string): string[] {
 		.filter((value) => /^[A-Za-z0-9._$-]+$/.test(value));
 }
 
+function track(state: JobState): void {
+	job.value = state;
+
+	if (state.id) {
+		jobId.value = state.id;
+		rememberExport(state.id);
+	}
+}
+
+function trackRetry(notice: RetryNotice): void {
+	retrying.value = notice;
+}
+
+function finish(): void {
+	done.value = true;
+	canResume.value = false;
+	jobId.value = '';
+	forgetExport();
+}
+
+function fail(caught: unknown): void {
+	error.value = caught instanceof Error ? caught.message : 'The export failed.';
+
+	// A job the server no longer knows about cannot be resumed; every other one can.
+	canResume.value = jobId.value !== '' && !(caught instanceof ApiError && caught.status === 404);
+
+	if (!canResume.value) {
+		jobId.value = '';
+		forgetExport();
+	}
+}
+
+async function discardBackup(): Promise<void> {
+	const id = jobId.value;
+
+	jobId.value = '';
+	canResume.value = false;
+	error.value = '';
+	job.value = null;
+	forgetExport();
+
+	if (id === '') {
+		return;
+	}
+
+	try {
+		await post('migratekit_job_cancel', { job_id: id });
+	} catch {
+		// The job may already be gone; the resume marker is cleared either way.
+	}
+}
+
 async function start(): Promise<void> {
 	if (running.value) {
 		return;
@@ -92,9 +164,22 @@ async function start(): Promise<void> {
 	running.value = true;
 	error.value = '';
 	done.value = false;
+	retrying.value = null;
 	job.value = null;
 
 	try {
+		// A backup left unfinished is cancelled first, so its half-built archive does not stay on the disk.
+		if (jobId.value !== '') {
+			try {
+				await post('migratekit_job_cancel', { job_id: jobId.value });
+			} catch {
+				// Already gone.
+			}
+
+			jobId.value = '';
+			forgetExport();
+		}
+
 		const payload: Record<string, unknown> = {
 			compression: compression.value,
 			password: password.value,
@@ -112,18 +197,52 @@ async function start(): Promise<void> {
 		await runJob(
 			post<JobState>('migratekit_export_start', payload),
 			'migratekit_export_step',
-			(state) => {
-				job.value = state;
-			},
+			track,
+			undefined,
+			trackRetry,
 		);
 
-		done.value = true;
+		finish();
 	} catch (caught) {
-		error.value = caught instanceof Error ? caught.message : 'The export failed.';
+		fail(caught);
 	} finally {
 		running.value = false;
+		retrying.value = null;
 	}
 }
+
+/** Pick the backup back up where it stopped, whether a step failed or the page was closed. */
+async function resumeBackup(): Promise<void> {
+	if (running.value || jobId.value === '') {
+		return;
+	}
+
+	running.value = true;
+	error.value = '';
+	done.value = false;
+
+	try {
+		const state = await post<JobState>('migratekit_status', { job_id: jobId.value });
+
+		await driveJob(state, 'migratekit_export_step', track, undefined, trackRetry);
+
+		finish();
+	} catch (caught) {
+		fail(caught);
+	} finally {
+		running.value = false;
+		retrying.value = null;
+	}
+}
+
+onMounted(() => {
+	const id = activeExportId();
+
+	if (id !== '') {
+		jobId.value = id;
+		void resumeBackup();
+	}
+});
 </script>
 
 <template>
@@ -253,11 +372,27 @@ async function start(): Promise<void> {
 				<span>{{ job.message || 'Working…' }}</span>
 				<span>{{ job.percent }}%</span>
 			</div>
+			<p v-if="running" class="mk-status">
+				You can leave this page or close the tab — the backup pauses and resumes from this screen when you return.
+			</p>
 		</div>
+
+		<p v-if="retrying" class="mk-warn" role="status">
+			The server did not answer ({{ retrying.message }}). Retrying in {{ retrying.delaySeconds }}s — attempt
+			{{ retrying.attempt }}. Nothing is lost: the backup continues from where it stopped.
+		</p>
 
 		<p v-if="done && job" class="mk-success">
 			Backup created: <strong>{{ job.archiveName }}</strong>
 		</p>
-		<p v-if="error" class="mk-error">{{ error }}</p>
+		<p v-if="error" class="mk-error">
+			{{ error }}
+			<button v-if="canResume" class="mk-link" type="button" :disabled="running" @click="resumeBackup">
+				Resume the backup
+			</button>
+			<button v-if="jobId" class="mk-link" type="button" :disabled="running" @click="discardBackup">
+				Discard it
+			</button>
+		</p>
 	</section>
 </template>

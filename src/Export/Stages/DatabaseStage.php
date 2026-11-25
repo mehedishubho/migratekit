@@ -1,6 +1,6 @@
 <?php
 /**
- * Dumps the database to storage/database.sql.
+ * Dumps the database to storage/database.sql, a few pages of rows per request.
  *
  * @package MigrateKit
  */
@@ -14,6 +14,7 @@ use MigrateKit\Database\Dumper;
 use MigrateKit\Database\ReplaceEngine;
 use MigrateKit\Pipeline\PipelineContext;
 use MigrateKit\Pipeline\StageInterface;
+use MigrateKit\Support\Bytes;
 
 final class DatabaseStage implements StageInterface {
 
@@ -33,24 +34,40 @@ final class DatabaseStage implements StageInterface {
 		}
 
 		$file   = rtrim($state['storage_dir'], '/\\') . DIRECTORY_SEPARATOR . 'database.sql';
-		$handle = fopen($file, 'wb');
+		$cursor = isset($state['database_cursor']) && is_array($state['database_cursor'])
+			? $state['database_cursor']
+			: array( 'bytes' => 0 );
+		$handle = fopen($file, 'c+b');
 
 		if ($handle === false) {
 			throw new \RuntimeException('Unable to write database dump: ' . $file);
 		}
 
-		$replace = self::replace_engine($state);
+		// A request killed mid-page appends SQL the cursor never recorded; drop it so the file matches the cursor.
+		fseek($handle, 0, SEEK_END);
 
-		$dumper = new Dumper(
+		if (ftell($handle) > (int) $cursor['bytes']) {
+			ftruncate($handle, (int) $cursor['bytes']);
+		}
+
+		fseek($handle, (int) $cursor['bytes']);
+
+		$replace = self::replace_engine($state);
+		$dumper  = new Dumper(
 			$ctx->db,
 			(string) $ctx->site->get('table_prefix', 'wp_'),
 			Protocol::TABLE_PREFIX,
 			$replace
 		);
 
-		$dumper->dump(
-			static function (string $chunk) use ($handle): void {
-				fwrite($handle, $chunk);
+		$completed = $dumper->dump_chunk(
+			$cursor,
+			static function (string $chunk) use ($handle, &$cursor): void {
+				if ($chunk !== '' && @fwrite($handle, $chunk) !== strlen($chunk)) {
+					throw new \RuntimeException('Unable to write the database dump — the disk may be full.');
+				}
+
+				$cursor['bytes'] += strlen($chunk);
 			},
 			array(
 				'excluded_tables'   => isset($state['options']['excluded_tables']) ? (array) $state['options']['excluded_tables'] : array(),
@@ -59,12 +76,20 @@ final class DatabaseStage implements StageInterface {
 				'no_spam_comments'  => ! empty($state['options']['no_spam_comments']),
 				'table_scope'       => self::table_scope($ctx->site, $state),
 				'extra_tables'      => self::extra_tables($ctx->site, $state),
-			)
+			),
+			$ctx->deadline()
 		);
 
 		fclose($handle);
 
-		$state['database_file'] = $file;
+		$state['database_cursor'] = $cursor;
+		$state['database_file']   = $file;
+
+		if (! $completed) {
+			$ctx->report(sprintf('Dumping the database (%s so far)', Bytes::format((int) $cursor['bytes'])));
+			return false;
+		}
+
 		$state['database_done'] = true;
 
 		$ctx->report('Dumped the database');

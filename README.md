@@ -102,9 +102,11 @@ php tests/run-parity.php    # parity audit (filters, chunks, browser, labels)
 
 `tools/interop-check.php` drives the reference plugin's own compressor/extractor to verify byte compatibility in both directions.
 
-`tools/mysql-integration.php <host> <user> <pass>` runs a real MariaDB dump/import round-trip (prefix change, URL replacement, serialized data, blobs, NULLs, exclusions).
+`tools/mysql-integration.php <host> <user> <pass>` runs a real MariaDB dump/import round-trip (prefix change, URL replacement, serialized data, blobs, NULLs, exclusions). It also pages a 20,000-row table and tables with composite, text, decimal and binary keys, and checks that a dump written one page per request is byte-identical to one written in a single pass.
 
-`tools/wp-smoke.php`, `tools/wp-import-smoke.php`, `tools/wp-rest-smoke.php`, `tools/wp-schedule-smoke.php`, `tools/wp-reset-smoke.php` and `tools/wp-cloud-smoke.php` are run inside a real WordPress with `wp eval-file` to exercise the job runner end to end (`tools/wp-*-test.sh` drive each one).
+`tools/wp-smoke.php`, `tools/wp-import-smoke.php`, `tools/wp-rest-smoke.php`, `tools/wp-schedule-smoke.php`, `tools/wp-reset-smoke.php` and `tools/wp-cloud-smoke.php` are run inside a real WordPress with `wp eval-file` to exercise the job runner end to end (`tools/wp-*-test.sh` drive each one). `tools/wp-long-smoke.php` does the same for a scheduled backup too big for one request: 60,000 files and a 500 MB incompressible file, with the cron requests that carry it along driven by hand.
+
+When the test install mounts the repository as the plugin (`tools/docker/smoke-compose.yml`), mount an empty volume over `wp-content/plugins/migratekit/storage` as well. Activating the plugin in the test install runs its storage cleanup, which deletes every job folder older than a week that the test install knows nothing about — including the real ones in the repository's `storage/`.
 
 ## Development
 

@@ -11,11 +11,21 @@ namespace MigrateKit\Job;
 
 final class Logger {
 
+	/** Seconds between two lines that report the same kind of progress. */
+	private const PROGRESS_INTERVAL = 1.0;
+
+	/** @var array<string,array{0:string,1:float}> Last progress line written for a job: its kind, and when. */
+	private static $progress = array();
+
 	private function __construct() {
 	}
 
 	/**
 	 * Append a line to the job log.
+	 *
+	 * A site with hundreds of thousands of files reports on every one of them,
+	 * so progress of one kind is written at most once a second. The log keeps
+	 * the trail; the live message is carried by the job state.
 	 *
 	 * @param array  $state   Job state (must contain storage_dir).
 	 * @param string $message Message to log.
@@ -27,6 +37,16 @@ final class Logger {
 		if ($directory === '') {
 			return;
 		}
+
+		$kind = implode(' ', array_slice(explode(' ', $message), 0, 2));
+		$now  = microtime(true);
+		$last = self::$progress[ $directory ] ?? null;
+
+		if ($last !== null && $last[0] === $kind && $now - $last[1] < self::PROGRESS_INTERVAL) {
+			return;
+		}
+
+		self::$progress[ $directory ] = array( $kind, $now );
 
 		$line = '[' . gmdate('Y-m-d H:i:s') . '] ' . $message . "\n";
 

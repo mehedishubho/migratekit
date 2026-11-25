@@ -307,6 +307,227 @@ check_my('create table preserved', isset($row[1]) && strpos($row[1], 'ENGINE=Inn
 $dst->close();
 
 // ---------------------------------------------------------------------------
+echo "\n[3] Row paging by key\n";
+
+/**
+ * Count and digest of every row of a table, independent of row order.
+ */
+function table_fingerprint(mysqli $link, string $table, string $where = ''): string {
+	$result  = q($link, 'SELECT * FROM `' . $table . '`' . ( $where !== '' ? ' WHERE ' . $where : '' ));
+	$digests = array();
+
+	while ( ( $row = $result->fetch_assoc() ) !== null ) {
+		$digests[] = md5( serialize( $row ) );
+	}
+
+	$result->free();
+	sort( $digests );
+
+	return count( $digests ) . ':' . md5( implode( '', $digests ) );
+}
+
+$src = connect_retry( $host, $user, $pass, 'src' );
+$src->set_charset( 'utf8mb4' );
+
+$result = q( $src, 'SHOW TABLES' );
+
+while ( ( $row = $result->fetch_row() ) !== null ) {
+	$src->query( 'DROP TABLE `' . $row[0] . '`' );
+}
+
+$result->free();
+
+$src->query(
+	'CREATE TABLE wp_posts (
+		ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		post_type VARCHAR(20) NOT NULL,
+		body LONGTEXT NOT NULL,
+		PRIMARY KEY (ID)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+);
+$src->query(
+	'CREATE TABLE wp_pair (
+		blog_id INT UNSIGNED NOT NULL,
+		slug VARCHAR(191) NOT NULL,
+		title TEXT NOT NULL,
+		PRIMARY KEY (blog_id, slug)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+);
+$src->query(
+	'CREATE TABLE wp_token (
+		token VARCHAR(191) NOT NULL,
+		note VARCHAR(100) NOT NULL,
+		PRIMARY KEY (token)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin'
+);
+$src->query(
+	'CREATE TABLE wp_price (
+		amount DECIMAL(12,2) NOT NULL,
+		label VARCHAR(50) NOT NULL,
+		PRIMARY KEY (amount)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+);
+$src->query(
+	'CREATE TABLE wp_nokey (
+		n INT NOT NULL,
+		label VARCHAR(50) NOT NULL,
+		KEY k (n)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+);
+$src->query(
+	'CREATE TABLE wp_bits (
+		hash VARBINARY(16) NOT NULL,
+		label VARCHAR(50) NOT NULL,
+		PRIMARY KEY (hash)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+);
+
+// 20,000 rows, every seventh one a revision the dump must skip and every 500th one far wider than the rest.
+$wide = str_repeat( 'lorem ipsum dolor sit amet ', 6000 );
+
+for ( $first = 1; $first <= 20000; $first += 200 ) {
+	$tuples = array();
+
+	for ( $n = $first; $n < $first + 200; $n++ ) {
+		$tuples[] = "( '" . ( $n % 7 === 0 ? 'revision' : 'post' ) . "', '" . ( $n % 500 === 0 ? $wide : 'row ' . $n ) . "' )";
+	}
+
+	q( $src, 'INSERT INTO wp_posts (post_type, body) VALUES ' . implode( ',', $tuples ) );
+}
+
+$slugs   = array( "o'brien", 'back\\slash', 'sp ace', 'ünïcødé', '0', '1e3', '-1', '(paren)', 'AND', "it''s", "two\nlines", '0x1A', ' 1', '1 ', 'quote"mark' );
+$pair    = $src->prepare( 'INSERT INTO wp_pair (blog_id, slug, title) VALUES (?, ?, ?)' );
+$blog_id = 0;
+$title   = '';
+
+foreach ( array( 2, 10, 1 ) as $blog ) {
+	foreach ( $slugs as $slug ) {
+		$blog_id = $blog;
+		$title   = 'row ' . $blog . ' ' . $slug;
+		$pair->bind_param( 'iss', $blog_id, $slug, $title );
+		$pair->execute();
+	}
+}
+
+$pair->close();
+
+$tokens = array( '', ' 1', '+1', '-0', '0x1A', '01', '1', '1.0', '1e3', 'A', 'a', "tab\there", "new\nline" );
+$token  = $src->prepare( 'INSERT INTO wp_token (token, note) VALUES (?, ?)' );
+$note   = '';
+
+foreach ( $tokens as $value ) {
+	$note = 'length ' . strlen( $value );
+	$token->bind_param( 'ss', $value, $note );
+	$token->execute();
+}
+
+$token->close();
+
+foreach ( array( '-3.25', '0.00', '0.05', '1.50', '10.00', '99999999.99' ) as $amount ) {
+	exec_insert( $src, 'INSERT INTO wp_price (amount, label) VALUES (?, ?)', array( $amount, 'costs ' . $amount ) );
+}
+
+for ( $n = 1; $n <= 3000; $n++ ) {
+	exec_insert( $src, 'INSERT INTO wp_nokey (n, label) VALUES (?, ?)', array( (string) ( $n % 40 ), 'no key ' . $n ) );
+}
+
+$bit = $src->prepare( 'INSERT INTO wp_bits (hash, label) VALUES (?, ?)' );
+
+for ( $n = 0; $n < 300; $n++ ) {
+	$hash  = $n < 5 ? str_repeat( chr( array( 0, 39, 92, 255, 126 )[ $n ] ), 16 ) : random_bytes( 16 );
+	$label = 'bits ' . $n;
+	$bit->bind_param( 'ss', $hash, $label );
+	$bit->execute();
+}
+
+$bit->close();
+
+$source_driver = new MysqliDriver( wpdb_wrap( $src, 'src', $host ) );
+$write         = array();
+$one           = tempnam( sys_get_temp_dir(), 'mkone' ) . '.sql';
+$handle        = fopen( $one, 'wb' );
+$started       = microtime( true );
+
+( new Dumper( $source_driver, 'wp_', 'SERVMASK_PREFIX_' ) )->dump(
+	static function ( string $chunk ) use ( $handle ): void {
+		fwrite( $handle, $chunk );
+	},
+	array( 'no_post_revisions' => true )
+);
+
+fclose( $handle );
+
+printf( "  one pass: %.2f s, %.1f MB of SQL, peak memory %d MB\n", microtime( true ) - $started, filesize( $one ) / 1048576, memory_get_peak_usage( true ) / 1048576 );
+
+// One page per request, as a site with a short request limit would dump it.
+$sliced  = tempnam( sys_get_temp_dir(), 'mksliced' ) . '.sql';
+$handle  = fopen( $sliced, 'wb' );
+$cursor  = array();
+$calls   = 0;
+$started = microtime( true );
+
+while ( ! ( new Dumper( $source_driver, 'wp_', 'SERVMASK_PREFIX_' ) )->dump_chunk(
+	$cursor,
+	static function ( string $chunk ) use ( $handle ): void {
+		fwrite( $handle, $chunk );
+	},
+	array( 'no_post_revisions' => true ),
+	microtime( true )
+) ) {
+	if ( ++$calls > 2000 ) {
+		throw new RuntimeException( 'The sliced dump did not finish: paging is not advancing.' );
+	}
+}
+
+fclose( $handle );
+
+printf( "  page per request: %d requests, %.2f s, peak memory %d MB\n", $calls + 1, microtime( true ) - $started, memory_get_peak_usage( true ) / 1048576 );
+
+same_my( 'dump sliced one page per request is byte-identical to one pass', hash_file( 'sha256', $one ), hash_file( 'sha256', $sliced ) );
+check_my( 'large table took pages of many rows, not one row each', $calls < 300 );
+check_my( 'wide rows did not pile up in memory', memory_get_peak_usage( true ) < 100 * 1048576 );
+
+$dumped     = (string) file_get_contents( $one );
+$dumped_rows = 0;
+
+preg_match_all( '/^INSERT INTO `SERVMASK_PREFIX_posts` .*$/m', $dumped, $statements );
+
+foreach ( $statements[0] as $statement ) {
+	$dumped_rows += substr_count( $statement, "),('" ) + 1;
+}
+
+same_my( 'large table: every post once, revisions skipped', 20000 - intdiv( 20000, 7 ), $dumped_rows );
+check_my( 'large table: the wide rows are in the dump', substr_count( $dumped, $wide ) === 40 - intdiv( 20000, 3500 ) );
+
+$admin = connect_retry( $host, $user, $pass );
+$admin->query( 'DROP DATABASE IF EXISTS dst' );
+$admin->query( 'CREATE DATABASE dst CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci' );
+$admin->close();
+
+$dst = connect_retry( $host, $user, $pass, 'dst' );
+$dst->query( "SET SESSION sql_mode=''" );
+( new Importer( new MysqliDriver( wpdb_wrap( $dst, 'dst', $host ) ), 'new_', 'SERVMASK_PREFIX_' ) )->import_file( $one );
+
+// The source side applies what the dump skipped, so both sides hold the same rows.
+$skipped = array( 'posts' => "`post_type` <> 'revision'" );
+
+foreach ( array( 'posts', 'pair', 'token', 'price', 'nokey', 'bits' ) as $name ) {
+	$filter = $skipped[ $name ] ?? '';
+
+	same_my(
+		"wp_{$name}: every row survives the dump and the import exactly",
+		table_fingerprint( $src, 'wp_' . $name, $filter ),
+		table_fingerprint( $dst, 'new_' . $name )
+	);
+}
+
+$dst->close();
+$src->close();
+
+unlink( $one );
+unlink( $sliced );
+
+// ---------------------------------------------------------------------------
 echo "\n";
 echo "passed: {$GLOBALS['my_pass']}, failed: {$GLOBALS['my_fail']}\n";
 exit($GLOBALS['my_fail'] === 0 ? 0 : 1);

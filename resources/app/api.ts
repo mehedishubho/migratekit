@@ -39,6 +39,19 @@ export interface JobState {
 
 type Payload = Record<string, unknown>;
 
+/** Error raised by post(). `transient` marks failures a retry can fix. */
+export class ApiError extends Error {
+	readonly status: number;
+	readonly transient: boolean;
+
+	constructor(message: string, status = 0, transient = false) {
+		super(message);
+		this.name = 'ApiError';
+		this.status = status;
+		this.transient = transient;
+	}
+}
+
 export async function post<T = unknown>(action: string, payload: Payload = {}, file?: File): Promise<T> {
 	const form = new FormData();
 	form.append('action', action);
@@ -69,88 +82,161 @@ export async function post<T = unknown>(action: string, payload: Payload = {}, f
 		form.append(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
 	}
 
-	const response = await fetch(config.ajaxUrl, {
-		method: 'POST',
-		credentials: 'same-origin',
-		body: form,
-	});
+	let response: Response;
+
+	try {
+		response = await fetch(config.ajaxUrl, {
+			method: 'POST',
+			credentials: 'same-origin',
+			body: form,
+		});
+	} catch {
+		throw new ApiError('The server could not be reached.', 0, true);
+	}
 
 	let json: { success?: boolean; data?: { message?: string } } | null = null;
 
 	try {
 		json = await response.json();
 	} catch {
-		throw new Error('The server returned an invalid response.');
+		json = null;
 	}
 
 	if (!json || !json.success) {
-		throw new Error(json?.data?.message || 'The request failed.');
+		const message = json?.data?.message;
+
+		// A message means the plugin itself answered, so the failure is final: retrying cannot change it.
+		if (message) {
+			const expired = response.status === 403 ? ' Your session may have expired: log in again and reload this page to resume.' : '';
+
+			throw new ApiError(message + expired, response.status);
+		}
+
+		if (response.status === 401 || response.status === 403) {
+			throw new ApiError('Your login session expired. Log in again, then reload this page to resume.', response.status);
+		}
+
+		// Anything else is an error page or a dropped connection, which usually clears on its own.
+		const reason =
+			response.status >= 500
+				? `The server ran into an error (HTTP ${response.status}) instead of answering.`
+				: 'The server returned an invalid response.';
+
+		throw new ApiError(reason, response.status, true);
 	}
 
 	return json.data as T;
 }
 
+/** First retry of a streak waits this long; each further one doubles the wait, up to RETRY_MAX_MS. */
+const RETRY_BASE_MS = 2000;
+const RETRY_MAX_MS = 30000;
+
+/** How long the server may stay unreachable before the job is left for a later resume. */
+const RETRY_WINDOW_MS = 15 * 60 * 1000;
+
+export interface RetryNotice {
+	/** 1 for the first retry after a successful step. */
+	attempt: number;
+	/** Seconds until that retry is sent. */
+	delaySeconds: number;
+	/** Why the last step failed. */
+	message: string;
+}
+
+/** Wait up to `ms`, ending early once `shouldStop()` turns true. */
+async function pause(ms: number, shouldStop?: () => boolean): Promise<void> {
+	let remaining = ms;
+
+	while (remaining > 0) {
+		if (shouldStop?.()) {
+			return;
+		}
+
+		const slice = Math.min(250, remaining);
+
+		await new Promise((resolve) => window.setTimeout(resolve, slice));
+		remaining -= slice;
+	}
+}
+
 /**
- * Drive a job to completion by polling the step endpoint. A failed step is
- * retried with backoff — the job itself is resumable server-side, so a single
- * transient request error should not kill a long export or import.
+ * Drive a job to completion by polling the step endpoint. The job is resumable
+ * server-side, so a step that fails to reach the server is retried with
+ * growing waits; a step the server rejects is reported at once.
  */
 export async function runJob(
 	startRequest: Promise<JobState>,
 	stepAction: string,
 	onUpdate: (state: JobState) => void,
 	shouldStop?: () => boolean,
+	onRetry?: (notice: RetryNotice) => void,
 ): Promise<JobState> {
-	return driveJob(await startRequest, stepAction, onUpdate, shouldStop);
+	return driveJob(await startRequest, stepAction, onUpdate, shouldStop, onRetry);
 }
 
 /**
  * Drive an already-created job to completion by polling the step endpoint.
- * A failed step is retried with backoff — the job itself is resumable
- * server-side, so a single transient request error should not kill a long
- * export or import. `shouldStop` is polled between requests so a cancel
- * from the page takes effect without waiting out the retry backoff.
+ * A failed step is retried with backoff for as long as the server stays
+ * unreachable. `shouldStop` is polled between requests so a cancel from the
+ * page takes effect without waiting out the retry backoff.
  */
 export async function driveJob(
 	state: JobState,
 	stepAction: string,
 	onUpdate: (state: JobState) => void,
 	shouldStop?: () => boolean,
+	onRetry?: (notice: RetryNotice) => void,
 ): Promise<JobState> {
 	onUpdate(state);
 
-	const attempts = 3;
+	// When the server was last reached; reset by every successful step.
+	let outageStartedAt: number | null = null;
+	let attempt = 0;
 
 	while (!state.done) {
 		if (shouldStop?.()) {
 			return state;
 		}
 
-		let next: JobState | null = null;
-		let failure: unknown = null;
+		let next: JobState;
 
-		for (let attempt = 1; attempt <= attempts; attempt++) {
-			try {
-				next = await post<JobState>(stepAction, { job_id: state.id });
-				failure = null;
-				break;
-			} catch (caught) {
-				failure = caught;
-
-				if (shouldStop?.()) {
-					return state;
-				}
-
-				if (attempt < attempts) {
-					await new Promise((resolve) => window.setTimeout(resolve, attempt * 800));
-				}
+		try {
+			next = await post<JobState>(stepAction, { job_id: state.id });
+		} catch (caught) {
+			if (shouldStop?.()) {
+				return state;
 			}
+
+			const error = caught instanceof ApiError ? caught : null;
+			const timedOut = outageStartedAt !== null && Date.now() - outageStartedAt > RETRY_WINDOW_MS;
+
+			if (error === null || !error.transient) {
+				throw caught;
+			}
+
+			if (timedOut) {
+				throw new ApiError(
+					`The server could not be reached for ${Math.round(RETRY_WINDOW_MS / 60000)} minutes. The job is paused and can be resumed once the site is back.`,
+					error.status,
+				);
+			}
+
+			if (outageStartedAt === null) {
+				outageStartedAt = Date.now();
+			}
+
+			const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(attempt, 4));
+			attempt += 1;
+
+			onRetry?.({ attempt, delaySeconds: Math.round(delay / 1000), message: error.message });
+
+			await pause(delay, shouldStop);
+			continue;
 		}
 
-		if (failure !== null || next === null) {
-			throw failure instanceof Error ? failure : new Error('The job could not continue.');
-		}
-
+		outageStartedAt = null;
+		attempt = 0;
 		state = next;
 		onUpdate(state);
 
@@ -158,10 +244,32 @@ export async function driveJob(
 			break;
 		}
 
-		await new Promise((resolve) => window.setTimeout(resolve, 200));
+		await pause(200, shouldStop);
 	}
 
 	return state;
+}
+
+/** localStorage key of the export job the browser last drove, so a later page load can resume it. */
+export const ACTIVE_EXPORT_KEY = 'migratekit-dashboard-job';
+
+export function rememberExport(jobId: string): void {
+	window.localStorage.setItem(ACTIVE_EXPORT_KEY, JSON.stringify({ id: jobId }));
+}
+
+export function forgetExport(): void {
+	window.localStorage.removeItem(ACTIVE_EXPORT_KEY);
+}
+
+/** Id of the export job a previous page load left unfinished, or ''. */
+export function activeExportId(): string {
+	try {
+		const raw = window.localStorage.getItem(ACTIVE_EXPORT_KEY);
+
+		return raw ? ((JSON.parse(raw) as { id?: string }).id ?? '') : '';
+	} catch {
+		return '';
+	}
 }
 
 export interface UploadProgress {

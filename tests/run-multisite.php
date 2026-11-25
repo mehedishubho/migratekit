@@ -94,6 +94,11 @@ final class MtFakeDriver implements DriverInterface {
 				}));
 			}
 
+			// The dumper pages through rows; honour the page it asked for.
+			if (preg_match('/\bLIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?$/i', $match[2], $limit) === 1) {
+				$rows = array_slice($rows, isset($limit[2]) && $limit[2] !== '' ? (int) $limit[2] : 0, (int) $limit[1]);
+			}
+
 			return new MtResult($rows);
 		}
 

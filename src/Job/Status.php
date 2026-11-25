@@ -21,10 +21,10 @@ final class Status {
 	/**
 	 * @param string $job_id Job identifier.
 	 * @param array  $state  Job state.
-	 * @return void
+	 * @return bool False when the state could not be stored.
 	 */
-	public static function write(string $job_id, array $state): void {
-		OptionStore::put(self::OPTION_PREFIX . $job_id, $state);
+	public static function write(string $job_id, array $state): bool {
+		return OptionStore::put(self::OPTION_PREFIX . $job_id, $state);
 	}
 
 	/**

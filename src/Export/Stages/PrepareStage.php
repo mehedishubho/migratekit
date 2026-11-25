@@ -32,11 +32,12 @@ final class PrepareStage implements StageInterface {
 			throw new \RuntimeException('Unable to create archive file: ' . $archive);
 		}
 
-		$state['archive_path'] = $archive;
-		$state['storage_dir']  = $storage;
-		$state['options']      = isset($state['options']) && is_array($state['options']) ? $state['options'] : array();
-		$state['manifests']    = isset($state['manifests']) ? $state['manifests'] : array();
-		$state['cursors']      = isset($state['cursors']) ? $state['cursors'] : array();
+		$state['archive_path']   = $archive;
+		$state['storage_dir']    = $storage;
+		$state['options']        = isset($state['options']) && is_array($state['options']) ? $state['options'] : array();
+		$state['scans']          = isset($state['scans']) && is_array($state['scans']) ? $state['scans'] : array();
+		$state['cursors']        = isset($state['cursors']) && is_array($state['cursors']) ? $state['cursors'] : array();
+		$state['archive_offset'] = isset($state['archive_offset']) ? (int) $state['archive_offset'] : 0;
 
 		$compression = isset($state['options']['compression']) ? (string) $state['options']['compression'] : '';
 		$password    = isset($state['options']['password']) ? (string) $state['options']['password'] : '';
