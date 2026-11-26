@@ -15,6 +15,7 @@ use MigrateKit\Database\Driver\Factory;
 use MigrateKit\Pipeline\PipelineContext;
 use MigrateKit\Site\WordPressSiteContext;
 use MigrateKit\Storage\BackupsRepository;
+use MigrateKit\Support\Bytes;
 use MigrateKit\Support\Maintenance;
 use MigrateKit\Support\Paths;
 
@@ -755,6 +756,27 @@ final class Runner {
 	}
 
 	/**
+	 * A second name for a file, or false where the host disabled link() or refused it.
+	 *
+	 * @param string $target Existing file.
+	 * @param string $link   Name to give it; must not exist yet.
+	 * @return bool
+	 */
+	private static function hard_link(string $target, string $link): bool {
+		if (is_file($link) || ! function_exists('link')) {
+			return false;
+		}
+
+		try {
+			@link($target, $link);
+		} catch (\Throwable $e) {
+			return false;
+		}
+
+		return is_file($link);
+	}
+
+	/**
 	 * Create an import job from a backup already on this server.
 	 *
 	 * @param string $backup_name Backup file name.
@@ -776,8 +798,11 @@ final class Runner {
 		$archive = $storage . DIRECTORY_SEPARATOR . 'upload.wpress';
 
 		// A second name for the same file beats a copy of it wherever the file system allows; the archive is only ever read here.
-		if ( ! @link($backup['path'], $archive) && ! @copy($backup['path'], $archive)) {
-			throw new \RuntimeException('Unable to read the backup for restore.');
+		if ( ! self::hard_link($backup['path'], $archive) && ! @copy($backup['path'], $archive)) {
+			throw new \RuntimeException(sprintf(
+				'The backup could not be copied for the restore. A server without hard links needs room for a second copy of the backup, about %s here, so check the free space on this server.',
+				Bytes::format((int) ( $backup['size'] ?? 0 ))
+			));
 		}
 
 		$tracked = ! empty($context['tracked']);

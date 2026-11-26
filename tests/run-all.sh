@@ -4,4 +4,6 @@ for f in tests/run.php tests/run-storage.php tests/run-database.php tests/run-pi
 	echo "== $f"
 	php "$f" 2>&1 | tail -1
 done
+echo "== tests/run-parity.php with link() disabled, as on some hosts"
+php -d disable_functions=link tests/run-parity.php 2>&1 | tail -1
 echo ALL-DONE

@@ -597,6 +597,10 @@ same_pw('the restore keeps the name of the backup', 'restore-me.wpress', $restor
 same_pw('the restore names the cloud', 's3', $restore['cloud']);
 check_pw('the restore has a label for the cloud', $restore['cloudLabel'] !== '');
 
+// What the restore reads is the fetched backup, whole, whether this PHP has link() or only copy() to give it a second name.
+$working = (string) ( Status::read($reserved)['archive_path'] ?? '' );
+check_pw('the restore has the whole backup to work on', is_file($working) && hash_file('sha256', $working) === hash_file('sha256', $archive_dir . '/restore-me.wpress'));
+
 $listed = Runner::open_jobs();
 
 same_pw('a job whose record is gone is dropped from the registry', array( $reserved ), ActiveJobs::ids());

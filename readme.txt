@@ -4,7 +4,7 @@ Tags: migrate, migration, backup, restore, export, import, multisite, clone
 Requires at least: 5.6
 Tested up to: 7.1.2
 Requires PHP: 7.4
-Stable tag: 0.0.14
+Stable tag: 0.0.15
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
 
@@ -64,6 +64,9 @@ PHP 7.4 or newer (8.2+ recommended) with the standard `openssl`, `zlib` and `bzi
 Yes: `wp migratekit export|backup|import|restore|backups|label|files|reset` plus `cloud list|test|files|push|pull`, including the full export option set as command flags.
 
 == Changelog ==
+
+= 0.0.15 =
+* Restoring a backup, from the Cloud page or the Backups page, no longer fails with "Call to undefined function MigrateKit\Job\link()" on hosts that disable PHP's `link()` function. Where a host does not allow hard links, the backup is copied for the restore instead. Such a host needs room on disk for a second copy of the backup until the next day's cleanup.
 
 = 0.0.14 =
 * Backups, restores and cloud transfers keep going after the page is reloaded: the same progress bar is still there and carries on from where it was, on whichever MigrateKit page you open.
